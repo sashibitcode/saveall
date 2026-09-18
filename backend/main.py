@@ -10,6 +10,9 @@ import shutil
 import tempfile
 import yt_dlp
 
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5175").rstrip("/")
+PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "http://127.0.0.1:8000").rstrip("/")
+
 
 def resolve_executable(name: str):
     if shutil.which(name):
@@ -47,21 +50,22 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
+    allow_origins=[origin for origin in [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
         "http://localhost:5175",
         "http://127.0.0.1:5175",
-    ],
+        FRONTEND_ORIGIN,
+    ] if origin],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-DOWNLOAD_DIR = os.path.join(
-    os.path.dirname(__file__),
-    "downloads"
+DOWNLOAD_DIR = os.getenv(
+    "DOWNLOAD_DIR",
+    os.path.join(tempfile.gettempdir(), "saveall-downloads"),
 )
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -259,7 +263,7 @@ def download_youtube(request: DownloadRequest):
             "title": title,
             "url": youtube_url,
             "file_name": file_name,
-            "download_url": f"/api/download-file?filename={quote(file_name)}",
+            "download_url": f"{PUBLIC_API_URL}/download-file?filename={quote(file_name)}",
         }
 
     except HTTPException:
@@ -289,7 +293,7 @@ def download_instagram(request: DownloadRequest):
 
     try:
         output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
-        node_path = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+        node_path = NODE_PATH
 
         ydl_options = {
             "format": "bestvideo+bestaudio/best",
@@ -300,15 +304,14 @@ def download_instagram(request: DownloadRequest):
             "quiet": False,
             "no_warnings": False,
             "skip_download": False,
-            "js_runtimes": {
-                "node": {"executable": node_path},
-            },
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
             },
             "cookiesfrombrowser": ("chrome", "edge", "brave"),
         }
+        if node_path:
+            ydl_options["js_runtimes"] = {"node": {"executable": node_path}}
 
         with yt_dlp.YoutubeDL(ydl_options) as ydl:
             info = ydl.extract_info(instagram_url, download=True)
@@ -335,7 +338,7 @@ def download_instagram(request: DownloadRequest):
             "title": title,
             "url": instagram_url,
             "file_name": file_name,
-            "download_url": f"/api/download-file?filename={quote(file_name)}",
+            "download_url": f"{PUBLIC_API_URL}/download-file?filename={quote(file_name)}",
         }
 
     except HTTPException:

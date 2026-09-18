@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: saveall-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: PUBLIC_API_URL
+        sync: false
