@@ -213,7 +213,7 @@ def download_youtube(request: DownloadRequest):
     try:
         output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
         ydl_options = {
-            "format": "bestvideo+bestaudio/best",
+            "format": "18/best[ext=mp4]/best",
             "outtmpl": output_template,
             "noplaylist": True,
             "merge_output_format": "mp4",
@@ -230,8 +230,7 @@ def download_youtube(request: DownloadRequest):
             },
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["web", "android", "tv_embedded"],
-                    "player_skip": ["webpage"],
+                    "player_client": ["android_vr"],
                 }
             },
             "paths": {"home": DOWNLOAD_DIR},
