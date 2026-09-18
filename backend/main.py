@@ -259,7 +259,7 @@ def download_youtube(request: DownloadRequest):
             "title": title,
             "url": youtube_url,
             "file_name": file_name,
-            "download_url": f"http://127.0.0.1:8000/download-file?filename={quote(file_name)}",
+            "download_url": f"/api/download-file?filename={quote(file_name)}",
         }
 
     except HTTPException:
@@ -335,7 +335,7 @@ def download_instagram(request: DownloadRequest):
             "title": title,
             "url": instagram_url,
             "file_name": file_name,
-            "download_url": f"http://127.0.0.1:8000/download-file?filename={quote(file_name)}",
+            "download_url": f"/api/download-file?filename={quote(file_name)}",
         }
 
     except HTTPException:

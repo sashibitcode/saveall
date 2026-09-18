@@ -2,6 +2,8 @@ import { useState } from "react";
 import "./App.css";
 import { SITE_CONFIG } from "./config";
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+
 function App() {
   const [platform, setPlatform] = useState("youtube");
   const [url, setUrl] = useState("");
@@ -49,8 +51,8 @@ const handleGetVideo = async () => {
   try {
     const endpoint =
       platform === "youtube"
-        ? "http://127.0.0.1:8000/download-youtube"
-        : "http://127.0.0.1:8000/download-instagram";
+        ? `${API_BASE_URL}/download-youtube`
+        : `${API_BASE_URL}/download-instagram`;
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -149,7 +151,7 @@ const handleGetVideo = async () => {
   className="download-button"
   onClick={async () => {
     try {
-      const fileUrl = result.downloadUrl || `http://127.0.0.1:8000/download-file?filename=${encodeURIComponent(result.fileName || "")}`;
+      const fileUrl = result.downloadUrl || `${API_BASE_URL}/download-file?filename=${encodeURIComponent(result.fileName || "")}`;
 
       if (!result.fileName && !result.downloadUrl) {
         throw new Error("No downloadable file was returned by the server.");

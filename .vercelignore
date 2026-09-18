@@ -1,0 +1,6 @@
+backend/downloads
+node_modules
+dist
+.git
+__pycache__
+*.pyc
