@@ -2,7 +2,42 @@ import { useState } from "react";
 import "./App.css";
 import { SITE_CONFIG } from "./config";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+const configuredApiUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+const API_BASE_URL = (configuredApiUrl || "/api").replace(/\/$/, "");
+
+function getApiConfigurationError() {
+  if (!import.meta.env.PROD) {
+    return "";
+  }
+
+  if (!configuredApiUrl) {
+    return "Production API URL is not configured. Set VITE_API_BASE_URL in Vercel and redeploy.";
+  }
+
+  try {
+    const parsed = new URL(API_BASE_URL);
+    if (parsed.protocol !== "https:") {
+      return "Production API must use an HTTPS URL.";
+    }
+    if (["localhost", "127.0.0.1"].includes(parsed.hostname)) {
+      return "Production API cannot use localhost. Set VITE_API_BASE_URL to the deployed HTTPS API URL.";
+    }
+  } catch {
+    return "Production API URL is invalid. Check VITE_API_BASE_URL in Vercel.";
+  }
+
+  return "";
+}
+
+async function readApiResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  const text = await response.text();
+  return text ? { detail: text.slice(0, 240) } : {};
+}
 
 function isValidYouTubeUrl(value) {
   try {
@@ -62,6 +97,11 @@ const handleGetVideo = async () => {
   setLoading(true);
 
   try {
+    const configurationError = getApiConfigurationError();
+    if (configurationError) {
+      throw new Error(configurationError);
+    }
+
     const endpoint =
       platform === "youtube"
         ? `${API_BASE_URL}/download-youtube`
@@ -78,7 +118,7 @@ const handleGetVideo = async () => {
       }),
     });
 
-    const data = await response.json();
+    const data = await readApiResponse(response);
 
     if (!response.ok) {
       throw new Error(data.detail || "Unable to process the link.");
@@ -98,7 +138,9 @@ const handleGetVideo = async () => {
   } catch (error) {
     console.error(error);
     setError(
-      error.message || "Backend connection failed. Please make sure the SAVEALL API is running."
+      error instanceof TypeError
+        ? "Backend se connection nahi ho paaya. API URL, HTTPS aur server availability check karein."
+        : error.message || "Unable to connect to the SAVEALL API."
     );
   } finally {
     setLoading(false);
@@ -170,21 +212,14 @@ const handleGetVideo = async () => {
         throw new Error("No downloadable file was returned by the server.");
       }
 
-      const response = await fetch(fileUrl);
-
-      if (!response.ok) {
-        throw new Error("Download failed.");
-      }
-
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url;
+      link.href = fileUrl;
       link.download = result.fileName || "saveall-download.mp4";
+      link.target = "_blank";
+      link.rel = "noopener";
       document.body.appendChild(link);
       link.click();
       link.remove();
-      window.URL.revokeObjectURL(url);
 
       alert(result.message || "Download started.");
     } catch (error) {

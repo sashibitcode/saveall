@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -12,9 +12,16 @@ import tempfile
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5175").rstrip("/")
-PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "http://127.0.0.1:8000").rstrip("/")
+FRONTEND_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5175"),
+    ).split(",")
+    if origin.strip()
+]
 YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
+INSTAGRAM_COOKIES_B64 = os.getenv("INSTAGRAM_COOKIES_B64", "").strip()
 
 
 def resolve_executable(name: str):
@@ -60,8 +67,9 @@ app.add_middleware(
         "http://127.0.0.1:5174",
         "http://localhost:5175",
         "http://127.0.0.1:5175",
-        FRONTEND_ORIGIN,
+        *FRONTEND_ORIGINS,
     ] if origin],
+    allow_origin_regex=r"https://saveall(?:-[a-z0-9]+(?:-sashibitcode)?)?\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -155,16 +163,16 @@ def find_downloaded_file(title: str = None):
     return max(candidates, key=os.path.getmtime)
 
 
-def create_cookie_file_from_env():
-    if not YOUTUBE_COOKIES_B64:
+def create_cookie_file_from_env(encoded_cookies: str, prefix: str):
+    if not encoded_cookies:
         return None
     cookie_file = tempfile.NamedTemporaryFile(
-        prefix="saveall-youtube-",
+        prefix=prefix,
         suffix=".txt",
         delete=False,
     )
     try:
-        cookie_file.write(base64.b64decode(YOUTUBE_COOKIES_B64))
+        cookie_file.write(base64.b64decode(encoded_cookies, validate=True))
         cookie_file.close()
         return cookie_file.name
     except Exception:
@@ -216,14 +224,14 @@ def is_valid_instagram_url(url: str) -> bool:
 
 
 @app.post("/download-youtube")
-def download_youtube(request: DownloadRequest):
-    if request.platform != "YouTube":
+def download_youtube(payload: DownloadRequest, request: Request):
+    if payload.platform != "YouTube":
         raise HTTPException(
             status_code=400,
             detail="This endpoint is only for YouTube."
         )
 
-    youtube_url = request.url.strip()
+    youtube_url = payload.url.strip()
     if not is_valid_youtube_url(youtube_url):
         raise HTTPException(
             status_code=400,
@@ -232,7 +240,10 @@ def download_youtube(request: DownloadRequest):
 
     try:
         output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
-        cookie_file = create_cookie_file_from_env()
+        cookie_file = create_cookie_file_from_env(
+            YOUTUBE_COOKIES_B64,
+            "saveall-youtube-",
+        )
         ydl_options = {
             "format": "18/best[ext=mp4]/best",
             "outtmpl": output_template,
@@ -244,15 +255,11 @@ def download_youtube(request: DownloadRequest):
             "skip_download": False,
             "restrictfilenames": False,
             "nocheckcertificate": True,
+            "remote_components": {"ejs:github"},
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android_vr"],
-                }
             },
             "paths": {"home": DOWNLOAD_DIR},
         }
@@ -290,7 +297,9 @@ def download_youtube(request: DownloadRequest):
             "title": title,
             "url": youtube_url,
             "file_name": file_name,
-            "download_url": f"{PUBLIC_API_URL}/download-file?filename={quote(file_name)}",
+            "download_url": str(request.url_for("download_file")).replace(
+                "/download-file", f"/download-file?filename={quote(file_name)}"
+            ),
         }
 
     except HTTPException:
@@ -299,6 +308,8 @@ def download_youtube(request: DownloadRequest):
         message = str(error)
         if "sign in to confirm" in message.lower() or "not a bot" in message.lower():
             detail = "YouTube ne production server ko bot samajhkar block kar diya. Ye link local machine par download ho raha hai, lekin public Render server par YouTube cookies ya approved API access required hai."
+        elif "http error 403" in message.lower() or "forbidden" in message.lower():
+            detail = "YouTube ne production server se media download deny kar diya (HTTP 403). Render me valid YOUTUBE_COOKIES_B64 configure karke backend redeploy karein, ya YouTube access allow hone wale server/API ka use karein."
         else:
             detail = f"Unable to process YouTube URL: {error}"
         print("YT-DLP ERROR:", repr(error))
@@ -309,14 +320,14 @@ def download_youtube(request: DownloadRequest):
 
 
 @app.post("/download-instagram")
-def download_instagram(request: DownloadRequest):
-    if request.platform != "Instagram":
+def download_instagram(payload: DownloadRequest, request: Request):
+    if payload.platform != "Instagram":
         raise HTTPException(
             status_code=400,
             detail="This endpoint is only for Instagram."
         )
 
-    instagram_url = request.url.strip()
+    instagram_url = payload.url.strip()
     if not is_valid_instagram_url(instagram_url):
         raise HTTPException(
             status_code=400,
@@ -325,7 +336,10 @@ def download_instagram(request: DownloadRequest):
 
     try:
         output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
-        node_path = NODE_PATH
+        cookie_file = create_cookie_file_from_env(
+            INSTAGRAM_COOKIES_B64,
+            "saveall-instagram-",
+        )
 
         ydl_options = {
             "format": "bestvideo+bestaudio/best",
@@ -340,13 +354,18 @@ def download_instagram(request: DownloadRequest):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
             },
-            "cookiesfrombrowser": ("chrome", "edge", "brave"),
         }
-        if node_path:
-            ydl_options["js_runtimes"] = {"node": {"executable": node_path}}
+        if NODE_PATH:
+            ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+        if cookie_file:
+            ydl_options["cookiefile"] = cookie_file
 
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
-            info = ydl.extract_info(instagram_url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_options) as ydl:
+                info = ydl.extract_info(instagram_url, download=True)
+        finally:
+            if cookie_file:
+                os.unlink(cookie_file)
 
         if not info:
             raise HTTPException(
@@ -370,7 +389,9 @@ def download_instagram(request: DownloadRequest):
             "title": title,
             "url": instagram_url,
             "file_name": file_name,
-            "download_url": f"{PUBLIC_API_URL}/download-file?filename={quote(file_name)}",
+            "download_url": str(request.url_for("download_file")).replace(
+                "/download-file", f"/download-file?filename={quote(file_name)}"
+            ),
         }
 
     except HTTPException:
@@ -378,7 +399,7 @@ def download_instagram(request: DownloadRequest):
     except Exception as error:
         message = str(error)
         if "empty media response" in message.lower() or "logged-in" in message.lower() or "cookies" in message.lower():
-            detail = "Instagram content is not public or is blocked without browser cookies. Use a public Instagram Reel/Post link or log in with browser cookies."
+            detail = "Instagram content public nahi hai ya login required hai. Public Reel/Post link use karein, ya Render me INSTAGRAM_COOKIES_B64 configure karke backend redeploy karein."
         else:
             detail = f"Unable to process Instagram URL: {error}"
         print("INSTAGRAM YT-DLP ERROR:", repr(error))
