@@ -15,7 +15,7 @@ The Vite dev server proxies `/api` to the local FastAPI server.
 
 ## Production deployment
 
-The backend is configured for Render through [render.yaml](render.yaml). Render installs FFmpeg and Node.js during the build, then starts FastAPI on Render's `$PORT`.
+The backend is configured for Render through [render.yaml](render.yaml). FFmpeg is supplied by the Python `imageio-ffmpeg` dependency, then FastAPI starts on Render's `$PORT`.
 
 Set these Render environment variables:
 

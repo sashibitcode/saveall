@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import yt_dlp
+from imageio_ffmpeg import get_ffmpeg_exe
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5175").rstrip("/")
 PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -29,7 +30,7 @@ def resolve_executable(name: str):
     return None
 
 
-FFMPEG_PATH = resolve_executable("ffmpeg.exe") or resolve_executable("ffmpeg")
+FFMPEG_PATH = resolve_executable("ffmpeg.exe") or resolve_executable("ffmpeg") or get_ffmpeg_exe()
 FFPROBE_PATH = resolve_executable("ffprobe.exe") or resolve_executable("ffprobe")
 NODE_PATH = resolve_executable("node.exe") or resolve_executable("node")
 FFMPEG_DIR = os.path.dirname(FFMPEG_PATH) if FFMPEG_PATH else None

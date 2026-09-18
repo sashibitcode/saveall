@@ -2,3 +2,4 @@ fastapi
 uvicorn
 pydantic
 yt-dlp
+imageio-ffmpeg
