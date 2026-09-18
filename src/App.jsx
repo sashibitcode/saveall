@@ -4,6 +4,23 @@ import { SITE_CONFIG } from "./config";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
+function isValidYouTubeUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:"
+    ) && (
+      host === "youtu.be" ||
+      host === "youtube.com" ||
+      host.endsWith(".youtube.com")
+    ) && parsed.pathname !== "/";
+  } catch {
+    return false;
+  }
+}
+
 function App() {
   const [platform, setPlatform] = useState("youtube");
   const [url, setUrl] = useState("");
@@ -26,11 +43,7 @@ const handleGetVideo = async () => {
   }
 
   if (platform === "youtube") {
-    const isYouTube =
-      cleanUrl.includes("youtube.com/") ||
-      cleanUrl.includes("youtu.be/");
-
-    if (!isYouTube) {
+    if (!isValidYouTubeUrl(cleanUrl)) {
       alert("Please enter a valid YouTube video link.");
       return;
     }

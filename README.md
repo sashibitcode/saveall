@@ -21,6 +21,7 @@ Set these Render environment variables:
 
 - `FRONTEND_ORIGIN`: the deployed Vercel URL
 - `PUBLIC_API_URL`: the deployed Render service URL
+- `YOUTUBE_COOKIES_B64`: optional base64-encoded `cookies.txt` for YouTube access when YouTube blocks Render's server IP
 
 Set this Vercel environment variable for Production and redeploy:
 

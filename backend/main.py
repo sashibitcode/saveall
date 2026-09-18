@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from urllib.parse import quote, urlparse
 
+import base64
 import mimetypes
 import os
 import shutil
@@ -13,6 +14,7 @@ from imageio_ffmpeg import get_ffmpeg_exe
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5175").rstrip("/")
 PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "http://127.0.0.1:8000").rstrip("/")
+YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
 
 
 def resolve_executable(name: str):
@@ -153,6 +155,24 @@ def find_downloaded_file(title: str = None):
     return max(candidates, key=os.path.getmtime)
 
 
+def create_cookie_file_from_env():
+    if not YOUTUBE_COOKIES_B64:
+        return None
+    cookie_file = tempfile.NamedTemporaryFile(
+        prefix="saveall-youtube-",
+        suffix=".txt",
+        delete=False,
+    )
+    try:
+        cookie_file.write(base64.b64decode(YOUTUBE_COOKIES_B64))
+        cookie_file.close()
+        return cookie_file.name
+    except Exception:
+        cookie_file.close()
+        os.unlink(cookie_file.name)
+        raise
+
+
 @app.get("/download-file")
 def download_file(filename: str):
     safe_name = os.path.basename(filename)
@@ -212,6 +232,7 @@ def download_youtube(request: DownloadRequest):
 
     try:
         output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
+        cookie_file = create_cookie_file_from_env()
         ydl_options = {
             "format": "18/best[ext=mp4]/best",
             "outtmpl": output_template,
@@ -237,9 +258,15 @@ def download_youtube(request: DownloadRequest):
         }
         if NODE_PATH:
             ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+        if cookie_file:
+            ydl_options["cookiefile"] = cookie_file
 
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_options) as ydl:
+                info = ydl.extract_info(youtube_url, download=True)
+        finally:
+            if cookie_file:
+                os.unlink(cookie_file)
 
         if not info:
             raise HTTPException(
