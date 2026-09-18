@@ -1,9 +1,10 @@
 services:
   - type: web
     name: saveall-api
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    runtime: python
+    plan: free
+    buildCommand: apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs && pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: FRONTEND_ORIGIN
