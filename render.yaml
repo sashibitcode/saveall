@@ -11,9 +11,3 @@ services:
         sync: false
       - key: FRONTEND_ORIGINS
         sync: false
-      - key: PUBLIC_API_URL
-        sync: false
-      - key: YOUTUBE_COOKIES_B64
-        sync: false
-      - key: INSTAGRAM_COOKIES_B64
-        sync: false

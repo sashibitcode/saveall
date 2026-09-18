@@ -4,7 +4,6 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from urllib.parse import quote, urlparse
 
-import base64
 import mimetypes
 import os
 import shutil
@@ -20,8 +19,6 @@ FRONTEND_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
-YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
-INSTAGRAM_COOKIES_B64 = os.getenv("INSTAGRAM_COOKIES_B64", "").strip()
 
 
 def resolve_executable(name: str):
@@ -163,24 +160,6 @@ def find_downloaded_file(title: str = None):
     return max(candidates, key=os.path.getmtime)
 
 
-def create_cookie_file_from_env(encoded_cookies: str, prefix: str):
-    if not encoded_cookies:
-        return None
-    cookie_file = tempfile.NamedTemporaryFile(
-        prefix=prefix,
-        suffix=".txt",
-        delete=False,
-    )
-    try:
-        cookie_file.write(base64.b64decode(encoded_cookies, validate=True))
-        cookie_file.close()
-        return cookie_file.name
-    except Exception:
-        cookie_file.close()
-        os.unlink(cookie_file.name)
-        raise
-
-
 @app.get("/download-file")
 def download_file(filename: str):
     safe_name = os.path.basename(filename)
@@ -224,7 +203,7 @@ def is_valid_instagram_url(url: str) -> bool:
 
 
 @app.post("/download-youtube")
-def download_youtube(payload: DownloadRequest, request: Request):
+def download_youtube(payload: DownloadRequest):
     if payload.platform != "YouTube":
         raise HTTPException(
             status_code=400,
@@ -238,85 +217,14 @@ def download_youtube(payload: DownloadRequest, request: Request):
             detail="Invalid YouTube URL."
         )
 
-    try:
-        output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
-        cookie_file = create_cookie_file_from_env(
-            YOUTUBE_COOKIES_B64,
-            "saveall-youtube-",
-        )
-        ydl_options = {
-            "format": "18/best[ext=mp4]/best",
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "merge_output_format": "mp4",
-            "ffmpeg_location": FFMPEG_DIR,
-            "quiet": False,
-            "no_warnings": False,
-            "skip_download": False,
-            "restrictfilenames": False,
-            "nocheckcertificate": True,
-            "remote_components": {"ejs:github"},
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-            "paths": {"home": DOWNLOAD_DIR},
-        }
-        if NODE_PATH:
-            ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
-        if cookie_file:
-            ydl_options["cookiefile"] = cookie_file
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_options) as ydl:
-                info = ydl.extract_info(youtube_url, download=True)
-        finally:
-            if cookie_file:
-                os.unlink(cookie_file)
-
-        if not info:
-            raise HTTPException(
-                status_code=500,
-                detail="YouTube metadata extraction returned no results."
-            )
-
-        title = info.get("title") or "youtube-video"
-        downloaded_file = find_downloaded_file(title) or find_downloaded_file()
-        file_name = os.path.basename(downloaded_file) if downloaded_file else None
-
-        if not file_name:
-            raise HTTPException(
-                status_code=500,
-                detail="YouTube file was not saved successfully."
-            )
-
-        return {
-            "status": "ready",
-            "message": "YouTube video is ready to download.",
-            "title": title,
-            "url": youtube_url,
-            "file_name": file_name,
-            "download_url": str(request.url_for("download_file")).replace(
-                "/download-file", f"/download-file?filename={quote(file_name)}"
-            ),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as error:
-        message = str(error)
-        if "sign in to confirm" in message.lower() or "not a bot" in message.lower():
-            detail = "YouTube ne production server ko bot samajhkar block kar diya. Ye link local machine par download ho raha hai, lekin public Render server par YouTube cookies ya approved API access required hai."
-        elif "http error 403" in message.lower() or "forbidden" in message.lower():
-            detail = "YouTube ne production server se media download deny kar diya (HTTP 403). Render me valid YOUTUBE_COOKIES_B64 configure karke backend redeploy karein, ya YouTube access allow hone wale server/API ka use karein."
-        else:
-            detail = f"Unable to process YouTube URL: {error}"
-        print("YT-DLP ERROR:", repr(error))
-        raise HTTPException(
-            status_code=500,
-            detail=detail
-        )
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "YouTube video download is not available in this production service. "
+            "The official YouTube APIs provide metadata and authorized playback, "
+            "not arbitrary video-file downloads. Open the video on YouTube instead."
+        ),
+    )
 
 
 @app.post("/download-instagram")
@@ -336,10 +244,6 @@ def download_instagram(payload: DownloadRequest, request: Request):
 
     try:
         output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
-        cookie_file = create_cookie_file_from_env(
-            INSTAGRAM_COOKIES_B64,
-            "saveall-instagram-",
-        )
 
         ydl_options = {
             "format": "bestvideo+bestaudio/best",
@@ -357,15 +261,8 @@ def download_instagram(payload: DownloadRequest, request: Request):
         }
         if NODE_PATH:
             ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
-        if cookie_file:
-            ydl_options["cookiefile"] = cookie_file
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_options) as ydl:
-                info = ydl.extract_info(instagram_url, download=True)
-        finally:
-            if cookie_file:
-                os.unlink(cookie_file)
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            info = ydl.extract_info(instagram_url, download=True)
 
         if not info:
             raise HTTPException(
@@ -399,7 +296,7 @@ def download_instagram(payload: DownloadRequest, request: Request):
     except Exception as error:
         message = str(error)
         if "empty media response" in message.lower() or "logged-in" in message.lower() or "cookies" in message.lower():
-            detail = "Instagram content public nahi hai ya login required hai. Public Reel/Post link use karein, ya Render me INSTAGRAM_COOKIES_B64 configure karke backend redeploy karein."
+            detail = "Instagram content public nahi hai ya login required hai. Sirf publicly accessible Reel/Post link use karein."
         else:
             detail = f"Unable to process Instagram URL: {error}"
         print("INSTAGRAM YT-DLP ERROR:", repr(error))

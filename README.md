@@ -21,9 +21,8 @@ Set these Render environment variables:
 
 - `FRONTEND_ORIGIN`: the deployed Vercel URL
 - `FRONTEND_ORIGINS`: optional comma-separated list of all deployed Vercel/custom frontend URLs
-- `PUBLIC_API_URL`: the deployed Render service URL
-- `YOUTUBE_COOKIES_B64`: optional base64-encoded `cookies.txt` for YouTube access when YouTube blocks Render's server IP
-- `INSTAGRAM_COOKIES_B64`: optional base64-encoded `cookies.txt` for login-required Instagram content; public links do not need it
+- YouTube video-file downloads are intentionally disabled in production. The official YouTube APIs do not provide arbitrary video-file downloads.
+- Instagram downloads are limited to publicly accessible Reel/Post links.
 
 Set this Vercel environment variable for Production and redeploy:
 
