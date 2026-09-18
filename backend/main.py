@@ -269,10 +269,15 @@ def download_youtube(request: DownloadRequest):
     except HTTPException:
         raise
     except Exception as error:
+        message = str(error)
+        if "sign in to confirm" in message.lower() or "not a bot" in message.lower():
+            detail = "YouTube ne production server ko bot samajhkar block kar diya. Ye link local machine par download ho raha hai, lekin public Render server par YouTube cookies ya approved API access required hai."
+        else:
+            detail = f"Unable to process YouTube URL: {error}"
         print("YT-DLP ERROR:", repr(error))
         raise HTTPException(
             status_code=500,
-            detail=f"Unable to process YouTube URL: {error}"
+            detail=detail
         )
 
 
