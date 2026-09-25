@@ -17,20 +17,19 @@ The Vite dev server proxies `/api` to the local FastAPI server.
 
 The backend is configured for Render through [render.yaml](render.yaml). FFmpeg is supplied by the Python `imageio-ffmpeg` dependency, then FastAPI starts on Render's `$PORT`.
 
-Set these Render environment variables:
+Set these Render environment variables (optional/recommended):
 
-- `FRONTEND_ORIGIN`: the deployed Vercel URL
+- `FRONTEND_ORIGIN`: the primary deployed Vercel URL (e.g. `https://saveall.vercel.app`)
 - `FRONTEND_ORIGINS`: optional comma-separated list of all deployed Vercel/custom frontend URLs
-- YouTube video-file downloads are intentionally disabled in production. The official YouTube APIs do not provide arbitrary video-file downloads.
-- Instagram downloads are limited to publicly accessible Reel/Post links.
+- `PUBLIC_API_URL`: canonical public HTTPS URL of the backend (e.g. `https://saveall-api.onrender.com`)
+- `INSTAGRAM_COOKIES_B64`: optional base64-encoded `cookies.txt` for restricted Instagram content; public links do not need it
+- `YOUTUBE_COOKIES_B64`: optional base64-encoded `cookies.txt` for YouTube access when YouTube blocks datacenter IPs
 
-Set this Vercel environment variable for Production and redeploy:
+Set this Vercel environment variable for Production (optional, defaults to `https://saveall-api.onrender.com`):
 
-- `VITE_API_BASE_URL`: the deployed Render service URL
+- `VITE_API_URL` (or `VITE_API_BASE_URL`): the deployed Render service URL
 
-After changing any Vercel variable, redeploy the frontend. After changing Render variables or backend code, redeploy the Render service and verify `/health` plus the browser CORS preflight.
-
-See [.env.example](.env.example) for the required variable names.
+See [.env.example](.env.example) for details.
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 

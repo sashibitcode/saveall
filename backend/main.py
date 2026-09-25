@@ -1,24 +1,39 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from urllib.parse import quote, urlparse
-
+import base64
 import mimetypes
 import os
 import shutil
 import tempfile
-import yt_dlp
-from imageio_ffmpeg import get_ffmpeg_exe
+import time
+from urllib.parse import quote, urlparse
 
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from imageio_ffmpeg import get_ffmpeg_exe
+from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import yt_dlp
+
+# Environment variables
 FRONTEND_ORIGINS = [
     origin.strip().rstrip("/")
     for origin in os.getenv(
         "FRONTEND_ORIGINS",
-        os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5175"),
+        os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5173"),
     ).split(",")
     if origin.strip()
 ]
+
+PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "").strip().rstrip("/")
+YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
+INSTAGRAM_COOKIES_B64 = os.getenv("INSTAGRAM_COOKIES_B64", "").strip()
+DOWNLOAD_DIR = os.getenv(
+    "DOWNLOAD_DIR",
+    os.path.join(tempfile.gettempdir(), "saveall-downloads"),
+)
+
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 def resolve_executable(name: str):
@@ -51,125 +66,164 @@ if NODE_PATH:
 
 app = FastAPI(
     title="SAVEALL API",
-    description="Backend API for SAVEALL",
+    description="Backend API for SAVEALL multi-platform downloader",
     version="1.0.0",
 )
 
+# CORS configuration: Allow local ports, Vercel deployments, Render consoles, and custom domains
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    *FRONTEND_ORIGINS,
+]
+# Clean out empty strings
+allowed_origins = [o for o in allowed_origins if o]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin for origin in [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:5175",
-        "http://127.0.0.1:5175",
-        *FRONTEND_ORIGINS,
-    ] if origin],
-    allow_origin_regex=r"https://saveall(?:-[a-z0-9]+(?:-sashibitcode)?)?\.vercel\.app$",
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://([a-zA-Z0-9_-]+\.)?(vercel\.app|onrender\.com)$",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS", "HEAD", "PUT", "DELETE"],
     allow_headers=["*"],
 )
-DOWNLOAD_DIR = os.getenv(
-    "DOWNLOAD_DIR",
-    os.path.join(tempfile.gettempdir(), "saveall-downloads"),
-)
-
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-@app.get("/")
-def home():
-    return {
-        "message": "SAVEALL API is running!",
-        "status": "success",
-    }
 
 
-@app.get("/health")
-def health():
-    return {
-        "status": "healthy"
-    }
-
-    
-
-
-class DownloadRequest(BaseModel):
-    platform: str
-    url: str
-
-
-@app.post("/download")
-def download_video(request: DownloadRequest):
-    if request.platform not in ["YouTube", "Instagram"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported platform."
-        )
-
-    if not request.url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid URL."
-        )
-
-        return {
-        "status": "ready",
-        "message": "Authorized download request received.",
-        "platform": request.platform,
-        "url": request.url,
-    }
+# Structured Error Handlers (Step 4 & 8)
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "error": detail,
+            "detail": detail,
+        },
+    )
 
 
-@app.get("/download-folder")
-def download_folder():
-    return {
-        "folder": DOWNLOAD_DIR,
-        "exists": os.path.exists(DOWNLOAD_DIR),
-    }
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    error_msg = "; ".join(f"{err.get('loc', ['field'])[-1]}: {err.get('msg', 'invalid')}" for err in exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={
+            "success": False,
+            "error": f"Invalid request data: {error_msg}",
+            "detail": f"Invalid request data: {error_msg}",
+        },
+    )
 
 
-def find_downloaded_file(title: str = None):
-    valid_ext = {".mp4", ".webm", ".mkv", ".avi", ".flv", ".m4v", ".mov", ".mp3", ".m4a"}
-    candidates = []
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    print("UNHANDLED SERVER ERROR:", repr(exc))
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": "Server returned an unexpected error. Please try again later.",
+            "detail": str(exc),
+        },
+    )
 
-    for entry in os.scandir(DOWNLOAD_DIR):
-        if not entry.is_file():
-            continue
-        if entry.name.endswith(".part"):
-            continue
 
-        name = entry.name.lower()
-        ext = os.path.splitext(name)[1]
-        if ext not in valid_ext:
-            continue
+def get_public_base_url(request: Request) -> str:
+    """Return the HTTPS public base URL, ensuring Render reverse proxies are properly handled."""
+    if PUBLIC_API_URL:
+        return PUBLIC_API_URL
 
-        if title is not None:
-            title_lower = title.lower()
-            if title_lower in name:
-                candidates.append(entry.path)
-            elif "".join(ch for ch in title_lower if ch.isalnum() or ch in " -_.") in "".join(ch for ch in name if ch.isalnum() or ch in " -_."):
-                candidates.append(entry.path)
-        else:
-            candidates.append(entry.path)
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+    host = forwarded_host or request.headers.get("host") or "127.0.0.1:8000"
+    scheme = forwarded_proto or request.url.scheme
 
-    if not candidates:
+    if "onrender.com" in host or forwarded_proto == "https":
+        scheme = "https"
+
+    return f"{scheme}://{host}"
+
+
+def cleanup_downloads(max_age_seconds: int = 1800):
+    """Remove temporary files older than 30 minutes to prevent disk exhaustion."""
+    now = time.time()
+    try:
+        if not os.path.exists(DOWNLOAD_DIR):
+            return
+        for entry in os.scandir(DOWNLOAD_DIR):
+            if entry.is_file():
+                try:
+                    if now - entry.stat().st_mtime > max_age_seconds or entry.name.endswith(".part"):
+                        os.remove(entry.path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def create_cookie_file_from_env(encoded_cookies: str, prefix: str):
+    """Write base64-encoded Netscape cookies to a temp file and return path."""
+    if not encoded_cookies:
+        return None
+    try:
+        decoded = base64.b64decode(encoded_cookies, validate=True)
+        temp_file = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".txt", delete=False)
+        temp_file.write(decoded)
+        temp_file.close()
+        return temp_file.name
+    except Exception as e:
+        print(f"Error decoding cookie file for {prefix}:", repr(e))
         return None
 
-    return max(candidates, key=os.path.getmtime)
 
+def find_downloaded_file(info: dict = None, title: str = None):
+    valid_ext = {".mp4", ".webm", ".mkv", ".avi", ".flv", ".m4v", ".mov", ".mp3", ".m4a"}
 
-@app.get("/download-file")
-def download_file(filename: str):
-    safe_name = os.path.basename(filename)
-    file_path = os.path.join(DOWNLOAD_DIR, safe_name)
+    if info:
+        req_dl = info.get("requested_downloads")
+        if req_dl and isinstance(req_dl, list) and len(req_dl) > 0:
+            filepath = req_dl[0].get("filepath")
+            if filepath and os.path.isfile(filepath):
+                return filepath
 
-    if not os.path.isfile(file_path):
-        raise HTTPException(status_code=404, detail="File not found.")
+    candidates = []
+    if os.path.exists(DOWNLOAD_DIR):
+        for entry in os.scandir(DOWNLOAD_DIR):
+            if not entry.is_file() or entry.name.endswith(".part"):
+                continue
 
-    media_type, _ = mimetypes.guess_type(file_path)
-    return FileResponse(file_path, media_type=media_type or "application/octet-stream", filename=safe_name)
+            name = entry.name.lower()
+            ext = os.path.splitext(name)[1]
+            if ext not in valid_ext:
+                continue
+
+            if title is not None:
+                title_lower = title.lower()
+                clean_title = "".join(ch for ch in title_lower if ch.isalnum() or ch in " -_.")
+                clean_name = "".join(ch for ch in name if ch.isalnum() or ch in " -_.")
+                if title_lower in name or (clean_title and clean_title in clean_name):
+                    candidates.append(entry.path)
+            else:
+                candidates.append(entry.path)
+
+    if candidates:
+        return max(candidates, key=os.path.getmtime)
+
+    # Fallback: most recent valid file in directory
+    all_files = [
+        entry.path for entry in os.scandir(DOWNLOAD_DIR)
+        if entry.is_file() and not entry.name.endswith(".part") and os.path.splitext(entry.name.lower())[1] in valid_ext
+    ]
+    return max(all_files, key=os.path.getmtime) if all_files else None
 
 
 def is_valid_youtube_url(url: str) -> bool:
@@ -196,111 +250,301 @@ def is_valid_instagram_url(url: str) -> bool:
         return False
     if parsed.scheme not in {"http", "https"}:
         return False
-    if host not in {"instagram.com", "www.instagram.com", "m.instagram.com", "www.instagram.com"}:
+    allowed_hosts = {
+        "instagram.com",
+        "www.instagram.com",
+        "m.instagram.com",
+        "instagr.am",
+        "www.instagr.am",
+        "ddinstagram.com",
+    }
+    if host not in allowed_hosts and not host.endswith(".instagram.com"):
         return False
     path = parsed.path.lower()
-    return any(segment in path for segment in ["/reel/", "/p/", "/tv/"])
+    return any(segment in path for segment in ["/reel/", "/reels/", "/p/", "/tv/"])
+
+
+class DownloadRequest(BaseModel):
+    platform: str = ""
+    url: str
+
+
+# Root and Health check endpoints (available at / and /api)
+@app.get("/")
+@app.get("/api")
+def home():
+    return {
+        "success": True,
+        "message": "SAVEALL API is running!",
+        "status": "success",
+    }
+
+
+@app.get("/health")
+@app.get("/api/health")
+def health():
+    return {
+        "success": True,
+        "status": "healthy",
+    }
+
+
+@app.get("/download-folder")
+@app.get("/api/download-folder")
+def download_folder():
+    return {
+        "success": True,
+        "folder": DOWNLOAD_DIR,
+        "exists": os.path.exists(DOWNLOAD_DIR),
+    }
+
+
+@app.get("/download-file")
+@app.get("/api/download-file")
+def download_file(filename: str):
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(DOWNLOAD_DIR, safe_name)
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found or has expired.")
+
+    media_type, _ = mimetypes.guess_type(file_path)
+    return FileResponse(
+        file_path,
+        media_type=media_type or "application/octet-stream",
+        filename=safe_name,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+        },
+    )
+
+
+# Unified Download Endpoint (Step 4 & 7)
+@app.post("/download")
+@app.post("/api/download")
+def download_media(payload: DownloadRequest, request: Request):
+    url = (payload.url or "").strip()
+    platform = (payload.platform or "").strip()
+
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL. Please enter a valid link starting with http:// or https://",
+        )
+
+    # Auto-detect platform if not provided
+    if not platform:
+        if is_valid_youtube_url(url):
+            platform = "YouTube"
+        elif is_valid_instagram_url(url):
+            platform = "Instagram"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported platform or URL. Supported platforms: YouTube, Instagram.",
+            )
+
+    payload.platform = platform
+    if platform.lower() == "youtube":
+        return download_youtube(payload, request)
+    elif platform.lower() == "instagram":
+        return download_instagram(payload, request)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported platform: {platform}. Supported: YouTube, Instagram.",
+        )
 
 
 @app.post("/download-youtube")
-def download_youtube(payload: DownloadRequest):
-    if payload.platform != "YouTube":
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only for YouTube."
-        )
-
+@app.post("/api/download-youtube")
+def download_youtube(payload: DownloadRequest, request: Request):
     youtube_url = payload.url.strip()
     if not is_valid_youtube_url(youtube_url):
         raise HTTPException(
             status_code=400,
-            detail="Invalid YouTube URL."
+            detail="Invalid YouTube URL. Please provide a valid YouTube video link.",
         )
 
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "YouTube video download is not available in this production service. "
-            "The official YouTube APIs provide metadata and authorized playback, "
-            "not arbitrary video-file downloads. Open the video on YouTube instead."
-        ),
-    )
+    cleanup_downloads()
+    cookie_file = create_cookie_file_from_env(YOUTUBE_COOKIES_B64, "saveall-youtube-")
+
+    output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
+    ydl_options = {
+        "format": "18/best[ext=mp4]/best",
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "merge_output_format": "mp4",
+        "ffmpeg_location": FFMPEG_DIR,
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": False,
+        "restrictfilenames": True,
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+                "skip": ["translated_subs"],
+            }
+        },
+    }
+
+    if NODE_PATH:
+        ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+    if cookie_file:
+        ydl_options["cookiefile"] = cookie_file
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            info = ydl.extract_info(youtube_url, download=True)
+
+        if not info:
+            raise HTTPException(
+                status_code=500,
+                detail="YouTube metadata extraction returned no results.",
+            )
+
+        title = info.get("title") or "youtube-video"
+        downloaded_file = find_downloaded_file(info, title) or find_downloaded_file()
+        file_name = os.path.basename(downloaded_file) if downloaded_file else None
+
+        if not file_name:
+            raise HTTPException(
+                status_code=500,
+                detail="YouTube media file was not saved successfully.",
+            )
+
+        base_url = get_public_base_url(request)
+        download_url = f"{base_url}/download-file?filename={quote(file_name)}"
+
+        return {
+            "success": True,
+            "status": "ready",
+            "message": "YouTube video is ready to download.",
+            "title": title,
+            "url": youtube_url,
+            "platform": "YouTube",
+            "file_name": file_name,
+            "download_url": download_url,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        msg = str(error)
+        print("YOUTUBE YT-DLP ERROR:", repr(error))
+        if "sign in to confirm" in msg.lower() or "not a bot" in msg.lower() or "bot" in msg.lower():
+            detail = (
+                "YouTube has restricted direct server downloads for this video to prevent automated requests. "
+                "Only authorized public videos without bot restrictions can be processed."
+            )
+        elif "http error 403" in msg.lower() or "forbidden" in msg.lower():
+            detail = "YouTube access denied (HTTP 403). YouTube restricts direct cloud server IP streaming for this video."
+        elif "private" in msg.lower() or "unavailable" in msg.lower():
+            detail = "This YouTube video is private or unavailable."
+        else:
+            detail = f"Unable to process YouTube URL: {error}"
+
+        raise HTTPException(status_code=400, detail=detail)
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
 
 
 @app.post("/download-instagram")
+@app.post("/api/download-instagram")
 def download_instagram(payload: DownloadRequest, request: Request):
-    if payload.platform != "Instagram":
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only for Instagram."
-        )
-
     instagram_url = payload.url.strip()
     if not is_valid_instagram_url(instagram_url):
         raise HTTPException(
             status_code=400,
-            detail="Invalid Instagram URL."
+            detail="Invalid Instagram URL. Please provide a valid Instagram Reel, Post, or Video link.",
         )
 
-    try:
-        output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
+    cleanup_downloads()
+    cookie_file = create_cookie_file_from_env(INSTAGRAM_COOKIES_B64, "saveall-instagram-")
 
-        ydl_options = {
-            "format": "bestvideo+bestaudio/best",
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "merge_output_format": "mp4",
-            "ffmpeg_location": FFMPEG_DIR,
-            "quiet": False,
-            "no_warnings": False,
-            "skip_download": False,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-        }
-        if NODE_PATH:
-            ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+    output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
+    ydl_options = {
+        "format": "bestvideo+bestaudio/best",
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "merge_output_format": "mp4",
+        "ffmpeg_location": FFMPEG_DIR,
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": False,
+        "restrictfilenames": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    }
+
+    if NODE_PATH:
+        ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+    if cookie_file:
+        ydl_options["cookiefile"] = cookie_file
+
+    try:
         with yt_dlp.YoutubeDL(ydl_options) as ydl:
             info = ydl.extract_info(instagram_url, download=True)
 
         if not info:
             raise HTTPException(
                 status_code=500,
-                detail="Instagram metadata extraction returned no results."
+                detail="Instagram metadata extraction returned no results.",
             )
 
         title = info.get("title") or "instagram-video"
-        downloaded_file = find_downloaded_file(title) or find_downloaded_file()
+        downloaded_file = find_downloaded_file(info, title) or find_downloaded_file()
         file_name = os.path.basename(downloaded_file) if downloaded_file else None
 
         if not file_name:
             raise HTTPException(
                 status_code=500,
-                detail="Instagram file was not saved successfully."
+                detail="Instagram media file was not saved successfully.",
             )
 
+        base_url = get_public_base_url(request)
+        download_url = f"{base_url}/download-file?filename={quote(file_name)}"
+
         return {
+            "success": True,
             "status": "ready",
             "message": "Instagram video is ready to download.",
             "title": title,
             "url": instagram_url,
+            "platform": "Instagram",
             "file_name": file_name,
-            "download_url": str(request.url_for("download_file")).replace(
-                "/download-file", f"/download-file?filename={quote(file_name)}"
-            ),
+            "download_url": download_url,
         }
 
     except HTTPException:
         raise
     except Exception as error:
-        message = str(error)
-        if "empty media response" in message.lower() or "logged-in" in message.lower() or "cookies" in message.lower():
-            detail = "Instagram content public nahi hai ya login required hai. Sirf publicly accessible Reel/Post link use karein."
+        msg = str(error)
+        print("INSTAGRAM YT-DLP ERROR:", repr(error))
+        if "empty media response" in msg.lower() or "logged-in" in msg.lower() or "cookies" in msg.lower():
+            detail = "This Instagram content is private or requires login. Only publicly accessible Instagram Reel/Post links can be downloaded."
+        elif "rate-limit" in msg.lower() or "429" in msg.lower():
+            detail = "Instagram request was rate-limited. Please wait a few minutes and try again."
         else:
             detail = f"Unable to process Instagram URL: {error}"
-        print("INSTAGRAM YT-DLP ERROR:", repr(error))
-        raise HTTPException(
-            status_code=500,
-            detail=detail
-        )
+
+        raise HTTPException(status_code=400, detail=detail)
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass

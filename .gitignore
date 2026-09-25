@@ -18,6 +18,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.venv/
+venv/
+env/
+*.part
 
 # Editor directories and files
 .vscode/*
