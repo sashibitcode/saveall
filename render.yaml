@@ -17,3 +17,5 @@ services:
         sync: false
       - key: YOUTUBE_COOKIES_B64
         sync: false
+      - key: YOUTUBE_PROXY
+        sync: false

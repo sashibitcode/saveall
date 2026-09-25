@@ -28,6 +28,7 @@ FRONTEND_ORIGINS = [
 PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "").strip().rstrip("/")
 YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
 INSTAGRAM_COOKIES_B64 = os.getenv("INSTAGRAM_COOKIES_B64", "").strip()
+YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", os.getenv("HTTP_PROXY", "")).strip()
 DOWNLOAD_DIR = os.getenv(
     "DOWNLOAD_DIR",
     os.path.join(tempfile.gettempdir(), "saveall-downloads"),
@@ -451,6 +452,8 @@ def download_youtube(payload: DownloadRequest, request: Request):
     js_cfg = get_js_runtimes_config()
     if js_cfg:
         ydl_options["js_runtimes"] = js_cfg
+    if YOUTUBE_PROXY:
+        ydl_options["proxy"] = YOUTUBE_PROXY
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
@@ -551,6 +554,8 @@ def download_instagram(payload: DownloadRequest, request: Request):
     js_cfg = get_js_runtimes_config()
     if js_cfg:
         ydl_options["js_runtimes"] = js_cfg
+    if YOUTUBE_PROXY:
+        ydl_options["proxy"] = YOUTUBE_PROXY
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
