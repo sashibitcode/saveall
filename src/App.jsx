@@ -308,7 +308,7 @@ function App() {
 
         <h1 className="hero-headline">
           Save Any Video, <br />
-          <span className="gradient-text">Pure Cinematic Quality.</span>
+          <span className="gradient-text">Anytime, Anywhere.</span>
         </h1>
 
         <p className="hero-description">
