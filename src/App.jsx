@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 import { SITE_CONFIG } from "./config";
 
@@ -74,13 +74,57 @@ function isValidInstagramUrl(value) {
   }
 }
 
+function formatDuration(sec) {
+  if (!sec || isNaN(sec)) return null;
+  const s = Math.floor(sec);
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+function formatBytes(bytes) {
+  if (!bytes || isNaN(bytes)) return null;
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let val = bytes;
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i++;
+  }
+  return `${val.toFixed(1)} ${units[i]}`;
+}
+
+const LOADING_STAGES = [
+  "Connecting to high-speed stream servers...",
+  "Extracting high-definition video & audio...",
+  "Optimizing packaging for fast MP4 stream...",
+  "Generating secure direct download link...",
+];
+
 function App() {
   const [platform, setPlatform] = useState("youtube");
   const [url, setUrl] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState("");
+  const [stageIndex, setStageIndex] = useState(0);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // Rotate loading stage for engaging cinematic feedback
+  useEffect(() => {
+    let timer;
+    if (loading) {
+      setStageIndex(0);
+      timer = setInterval(() => {
+        setStageIndex((prev) => (prev < LOADING_STAGES.length - 1 ? prev + 1 : prev));
+      }, 2200);
+    }
+    return () => clearInterval(timer);
+  }, [loading]);
 
   const handleGetVideo = async () => {
     const cleanUrl = url.trim();
@@ -89,40 +133,26 @@ function App() {
     setResult(null);
 
     if (!cleanUrl) {
-      alert(
-        `Please paste a ${
-          platform === "youtube" ? "YouTube" : "Instagram"
-        } link.`
-      );
+      setError(`Please paste a ${platform === "youtube" ? "YouTube" : "Instagram"} video link.`);
       return;
     }
 
-    if (platform === "youtube") {
-      if (!isValidYouTubeUrl(cleanUrl)) {
-        alert("Please enter a valid YouTube video link.");
-        return;
-      }
+    if (platform === "youtube" && !isValidYouTubeUrl(cleanUrl)) {
+      setError("Please enter a valid YouTube video link (e.g. https://www.youtube.com/watch?v=...)");
+      return;
     }
 
-    if (platform === "instagram") {
-      if (!isValidInstagramUrl(cleanUrl)) {
-        alert("Please enter a valid Instagram reel or post link.");
-        return;
-      }
+    if (platform === "instagram" && !isValidInstagramUrl(cleanUrl)) {
+      setError("Please enter a valid Instagram reel or post link (e.g. https://www.instagram.com/reel/...)");
+      return;
     }
 
     setLoading(true);
-    setLoadingMessage("Processing video link...");
 
-    // Abort controller with 70s timeout to accommodate Render free tier cold starts
     const controller = new AbortController();
-    const timeoutTimer = setTimeout(() => {
-      setLoadingMessage("Server is waking up from sleep, please allow a few more seconds...");
-    }, 15000);
-
     const abortTimer = setTimeout(() => {
       controller.abort();
-    }, 70000);
+    }, 85000);
 
     try {
       const configurationError = getApiConfigurationError();
@@ -145,7 +175,6 @@ function App() {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutTimer);
       clearTimeout(abortTimer);
 
       const data = await readApiResponse(response);
@@ -159,54 +188,42 @@ function App() {
             : response.status === 404
             ? "API endpoint was not found on the server."
             : response.status === 502 || response.status === 503
-            ? "Backend server is temporarily unavailable. Please try again shortly."
+            ? "Backend server is temporarily waking up. Please try again shortly."
             : "Server returned an error while processing the link.");
         throw new Error(errorMsg);
-      }
-
-      if (import.meta.env.DEV) {
-        console.log("Backend Response:", data);
       }
 
       setResult({
         platform: data.platform || (platform === "youtube" ? "YouTube" : "Instagram"),
         url: cleanUrl,
-        status: data.status || "Ready",
+        status: data.status || "ready",
         title: data.title || "Video ready",
         fileName: data.file_name || "",
         downloadUrl: data.download_url || "",
+        thumbnail: data.thumbnail || null,
+        duration: data.duration || null,
+        uploader: data.uploader || null,
+        filesize: data.filesize || null,
         message: data.message || "Video is ready for download.",
       });
     } catch (err) {
-      clearTimeout(timeoutTimer);
       clearTimeout(abortTimer);
 
-      if (import.meta.env.DEV) {
-        console.error("Downloader request error:", err);
-      }
-
       if (err.name === "AbortError") {
-        setError(
-          "Request timed out. The backend server may be waking up from sleep. Please wait a moment and try again."
-        );
+        setError("Request timed out. The server might be busy or waking up. Please try again.");
       } else if (err instanceof TypeError && err.message.toLowerCase().includes("fetch")) {
-        setError(
-          "Backend server is unavailable or blocked by network/CORS. Please verify the Render backend service is running."
-        );
+        setError("Backend server is unreachable. Please verify network connection or server status.");
       } else {
         setError(err.message || "Download could not be completed.");
       }
     } finally {
       setLoading(false);
-      setLoadingMessage("");
     }
   };
 
   const handleDownloadFile = () => {
     try {
-      if (!result) {
-        return;
-      }
+      if (!result) return;
 
       let fileUrl = result.downloadUrl;
       if (!fileUrl && result.fileName) {
@@ -217,7 +234,6 @@ function App() {
         throw new Error("No downloadable file was returned by the server.");
       }
 
-      // Upgrade HTTP to HTTPS if the frontend is loaded over HTTPS to prevent mixed-content blocks
       if (window.location.protocol === "https:" && fileUrl.startsWith("http://")) {
         fileUrl = fileUrl.replace(/^http:\/\//, "https://");
       }
@@ -231,39 +247,87 @@ function App() {
       link.click();
       link.remove();
     } catch (err) {
-      console.error(err);
-      alert(err.message || "Download request failed. Please make sure the backend is reachable.");
+      alert(err.message || "Download request failed.");
+    }
+  };
+
+  const handleCopyLink = async () => {
+    if (!result?.downloadUrl) return;
+    try {
+      await navigator.clipboard.writeText(result.downloadUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // Fallback
+    }
+  };
+
+  const handlePaste = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setUrl(text);
+        setError("");
+      }
+    } catch {
+      setError("Clipboard access denied. Please paste using Ctrl + V.");
     }
   };
 
   return (
-    <div className="app">
-      <nav className="navbar">
-        <div className="logo">
-          <span>S</span> SAVEALL
+    <div className={`app-wrapper theme-${platform}`}>
+      {/* Cinematic Ambient Glows */}
+      <div className="ambient-glow ambient-glow-primary" aria-hidden="true" />
+      <div className="ambient-glow ambient-glow-secondary" aria-hidden="true" />
+      <div className="grid-overlay" aria-hidden="true" />
+
+      {/* Header / Navbar */}
+      <header className="cinematic-nav">
+        <div className="nav-container">
+          <div className="brand">
+            <div className="brand-badge">
+              <span className="brand-initial">S</span>
+            </div>
+            <div className="brand-text">
+              <span className="brand-title">SAVEALL</span>
+              <span className="brand-tag">PRO</span>
+            </div>
+          </div>
+
+          <div className="nav-actions">
+            <div className="engine-status">
+              <span className="status-dot pulsing"></span>
+              <span className="status-label">Ultra Engine Active</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Hero Section */}
+      <main className="cinematic-main">
+        <div className="hero-badge">
+          <span className="badge-spark">✦</span>
+          <span>CINEMATIC MEDIA DOWNLOADER</span>
+          <span className="badge-pill">FAST & SECURE</span>
         </div>
 
-        <div className="nav-badge">VIDEO DOWNLOADER</div>
-      </nav>
-
-      <main className="hero">
-        <div className="badge">⚡ FAST • SIMPLE • EASY</div>
-
-        <h1>
-          Save Your Content,
-          <br />
-          <span>Your Way.</span>
+        <h1 className="hero-headline">
+          Save Any Video, <br />
+          <span className="gradient-text">Pure Cinematic Quality.</span>
         </h1>
 
-        <p className="subtitle">
-          Paste your video link and get started in seconds.
+        <p className="hero-description">
+          Instant high-speed media processing for YouTube & Instagram with lossless audio clarity.
         </p>
 
-        <div className="download-card">
-          {/* Platform Tabs */}
-          <div className="tabs">
+        {/* Master Control Card */}
+        <section className={`media-card-shell platform-${platform}`}>
+          {/* Platform Segmented Switcher */}
+          <div className="platform-switcher" role="tablist">
             <button
-              className={`tab ${platform === "youtube" ? "active youtube" : ""}`}
+              role="tab"
+              aria-selected={platform === "youtube"}
+              className={`switcher-pill ${platform === "youtube" ? "active" : ""}`}
               onClick={() => {
                 setPlatform("youtube");
                 setUrl("");
@@ -271,12 +335,19 @@ function App() {
                 setError("");
               }}
             >
-              <span className="youtube-icon">▶</span>
-              YouTube
+              <span className="pill-icon yt-icon">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                </svg>
+              </span>
+              <span>YouTube</span>
+              {platform === "youtube" && <span className="active-glow-bar" />}
             </button>
 
             <button
-              className={`tab ${platform === "instagram" ? "active instagram" : ""}`}
+              role="tab"
+              aria-selected={platform === "instagram"}
+              className={`switcher-pill ${platform === "instagram" ? "active" : ""}`}
               onClick={() => {
                 setPlatform("instagram");
                 setUrl("");
@@ -284,169 +355,337 @@ function App() {
                 setError("");
               }}
             >
-              <span className="instagram-icon">◎</span>
-              Instagram
+              <span className="pill-icon ig-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="2" width="20" height="20" rx="5" ry="5"/>
+                  <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/>
+                  <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/>
+                </svg>
+              </span>
+              <span>Instagram</span>
+              {platform === "instagram" && <span className="active-glow-bar" />}
             </button>
           </div>
 
-          {/* Selected Platform */}
-          <div className="selected-platform">
-            <div className="platform-icon">
-              {platform === "youtube" ? "▶" : "◎"}
+          {/* Subheader Title */}
+          <div className="card-header-info">
+            <div className="header-icon-wrap">
+              {platform === "youtube" ? (
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M10 15l5.19-3L10 9v6m11.56-7.83c.13.47.22 1.1.28 1.9.07.8.1 1.49.1 2.09L22 12c0 2.19-.16 3.8-.44 4.83-.25.9-.83 1.48-1.73 1.73-.47.13-1.33.22-2.65.28-1.3.07-2.49.1-3.59.1L12 19c-4.19 0-6.8-.16-7.83-.44-.9-.25-1.48-.83-1.73-1.73-.13-.47-.22-1.1-.28-1.9-.07-.8-.1-1.49-.1-2.09L2 12c0-2.19.16-3.8.44-4.83.25-.9.83-1.48 1.73-1.73.47-.13 1.33-.22 2.65-.28 1.3-.07 2.49-.1 3.59-.1L12 5c4.19 0 6.8.16 7.83.44.9.25 1.48.83 1.73 1.73z"/>
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="2" width="20" height="20" rx="5" ry="5"/>
+                  <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/>
+                  <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/>
+                </svg>
+              )}
             </div>
-
-            <div>
-              <h2>
-                {platform === "youtube"
-                  ? "YouTube Video Downloader"
-                  : "Instagram Video Downloader"}
-              </h2>
-
+            <div className="header-text-wrap">
+              <h2>{platform === "youtube" ? "YouTube Downloader" : "Instagram Reels & Posts"}</h2>
               <p>
                 {platform === "youtube"
-                  ? "Paste your YouTube video link below"
-                  : "Paste your Instagram reel or post link below"}
+                  ? "Paste any YouTube video or Shorts link"
+                  : "Paste any Instagram Reel, Post, or Video link"}
               </p>
             </div>
           </div>
 
-          {/* URL Input */}
-          <div className="input-area">
+          {/* Input Box Area */}
+          <div className="input-group-cinematic">
+            <div className="input-prefix-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              </svg>
+            </div>
+
             <input
               type="text"
+              className="cinematic-input"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder={
-                platform === "youtube"
-                  ? "https://youtube.com/watch?v=..."
-                  : "https://instagram.com/reel/..."
-              }
-            />
-
-            <button
-              className="paste-button"
-              onClick={async () => {
-                try {
-                  const text = await navigator.clipboard.readText();
-                  setUrl(text);
-                } catch {
-                  alert("Please paste the link manually using Ctrl + V.");
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (error) setError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !loading) {
+                  handleGetVideo();
                 }
               }}
-            >
-              Paste
-            </button>
+              placeholder={
+                platform === "youtube"
+                  ? "https://www.youtube.com/watch?v=... or shorts"
+                  : "https://www.instagram.com/reel/..."
+              }
+              aria-label="Video URL"
+              disabled={loading}
+            />
+
+            <div className="input-actions">
+              {url && (
+                <button
+                  type="button"
+                  className="action-icon-btn clear-btn"
+                  onClick={() => setUrl("")}
+                  title="Clear input"
+                  aria-label="Clear input"
+                >
+                  ✕
+                </button>
+              )}
+              <button
+                type="button"
+                className="action-paste-btn"
+                onClick={handlePaste}
+                title="Paste from clipboard"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                  <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                </svg>
+                <span>Paste</span>
+              </button>
+            </div>
           </div>
 
-          {/* Get Video */}
+          {/* Primary Action Button */}
           <button
-            className="get-button"
+            type="button"
+            className={`cinematic-cta-btn ${loading ? "is-loading" : ""}`}
             onClick={handleGetVideo}
             disabled={loading}
           >
-            {loading ? (loadingMessage || "Processing...") : "Get Video"}
-            {!loading && <span>→</span>}
+            {loading ? (
+              <div className="btn-loading-content">
+                <span className="spinner-ring" />
+                <span>Processing Media Stream...</span>
+              </div>
+            ) : (
+              <div className="btn-normal-content">
+                <span>Fetch Video</span>
+                <svg className="cta-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                  <polyline points="12 5 19 12 12 19" />
+                </svg>
+              </div>
+            )}
+            <span className="btn-shine" />
           </button>
 
-          {/* Error Message */}
-          {error && (
-            <div className="error-message">
-              ⚠️ {error}
-            </div>
-          )}
-
-          {/* Result Card */}
-          {result && (
-            <div className="result-card">
-              <div className="result-icon">✓</div>
-
-              <div className="result-content">
-                <span className="result-platform">{result.platform}</span>
-
-                <h3>{result.title}</h3>
-
-                <p>{result.url}</p>
-
-                <span className="result-status">● {result.status}</span>
-
-                <button
-                  className="download-button"
-                  onClick={handleDownloadFile}
-                >
-                  Download File
-                </button>
+          {/* Cinematic Animated Progress Bar & Stage Indicator */}
+          {loading && (
+            <div className="cinematic-progress-wrap">
+              <div className="progress-bar-track">
+                <div className="progress-bar-fill" />
+              </div>
+              <div className="progress-status-row">
+                <span className="pulse-beacon" />
+                <span className="progress-message">{LOADING_STAGES[stageIndex]}</span>
               </div>
             </div>
           )}
 
-          <p className="note">
-            🔒 Use only content you own or have permission to download.
+          {/* Error Banner */}
+          {error && (
+            <div className="cinematic-error-banner" role="alert">
+              <div className="error-icon-box">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              </div>
+              <div className="error-text">{error}</div>
+              <button
+                type="button"
+                className="error-dismiss"
+                onClick={() => setError("")}
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* Result Card: Cinematic Video Stage */}
+          {result && (
+            <div className="cinematic-result-stage">
+              <div className="result-backdrop" />
+              
+              <div className="result-inner-grid">
+                {/* Thumbnail Display */}
+                {result.thumbnail && (
+                  <div className="result-thumb-wrapper">
+                    <img
+                      src={result.thumbnail}
+                      alt={result.title}
+                      className="result-thumb-img"
+                      loading="lazy"
+                    />
+                    <div className="thumb-gradient-overlay" />
+                    {result.duration && (
+                      <span className="thumb-duration-pill">
+                        {formatDuration(result.duration)}
+                      </span>
+                    )}
+                    <span className="thumb-format-pill">MP4 • 720p HD</span>
+                  </div>
+                )}
+
+                {/* Video Info Details */}
+                <div className="result-details">
+                  <div className="result-meta-tags">
+                    <span className={`meta-platform-tag tag-${result.platform.toLowerCase()}`}>
+                      {result.platform}
+                    </span>
+                    {result.filesize && (
+                      <span className="meta-size-tag">
+                        💾 {formatBytes(result.filesize)}
+                      </span>
+                    )}
+                    <span className="meta-status-tag">
+                      ✓ Ready for Instant Download
+                    </span>
+                  </div>
+
+                  <h3 className="result-title" title={result.title}>
+                    {result.title}
+                  </h3>
+
+                  {result.uploader && (
+                    <p className="result-uploader">
+                      <span>Creator:</span> {result.uploader}
+                    </p>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="result-action-row">
+                    <button
+                      type="button"
+                      className="cinematic-download-btn"
+                      onClick={handleDownloadFile}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      <span>Download Video (MP4)</span>
+                    </button>
+
+                    {result.downloadUrl && (
+                      <button
+                        type="button"
+                        className="cinematic-copy-btn"
+                        onClick={handleCopyLink}
+                        title="Copy direct file URL"
+                      >
+                        {copied ? (
+                          <>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            <span>Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                            </svg>
+                            <span>Direct Link</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <p className="compliance-note">
+            <span className="lock-icon">🔒</span>
+            <span>Fast, secure extraction. Use only content you own or have permission to download.</span>
           </p>
-        </div>
+        </section>
 
-        {/* Features */}
-        <div className="features">
-          <div className="feature">
-            <div>⚡</div>
-            <span>Fast & Simple</span>
+        {/* Cinematic Feature Highlights Cards */}
+        <div className="cinematic-features-grid">
+          <div className="feature-card">
+            <div className="feature-icon-bubble bubble-lightning">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
+            </div>
+            <h4>Blazing Acceleration</h4>
+            <p>Multi-threaded fragment downloads deliver finished MP4s in seconds.</p>
           </div>
 
-          <div className="feature">
-            <div>🔒</div>
-            <span>Privacy Focused</span>
+          <div className="feature-card">
+            <div className="feature-icon-bubble bubble-shield">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+            </div>
+            <h4>Zero Ads & Tracking</h4>
+            <p>Direct media streaming with no intrusive popups, adware, or redirects.</p>
           </div>
 
-          <div className="feature">
-            <div>📱</div>
-            <span>Mobile Friendly</span>
+          <div className="feature-card">
+            <div className="feature-icon-bubble bubble-device">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+                <line x1="12" y1="18" x2="12.01" y2="18" />
+              </svg>
+            </div>
+            <h4>Universal Responsive</h4>
+            <p>Seamless experience precision-crafted for iPhones, Androids, and 4K screens.</p>
           </div>
         </div>
       </main>
 
-      <footer className="site-footer">
-        <div className="footer-container">
-          {/* Footer Brand */}
-          <div className="footer-brand">
+      {/* Cinematic Site Footer */}
+      <footer className="cinematic-footer">
+        <div className="footer-content">
+          <div className="footer-brand-line">
             <div className="footer-logo">
-              <span>S</span>
-              SAVEALL
+              <span className="footer-logo-box">S</span>
+              <span className="footer-logo-title">SAVEALL</span>
             </div>
-
-            <p>All-in-One Downloader</p>
-
-            <div className="footer-tagline">
-              Fast <span>•</span> Simple <span>•</span> Secure
-            </div>
+            <p className="footer-tagline">
+              Premium All-in-One Downloader <span>•</span> Fast • Pure • Secure
+            </p>
           </div>
 
-          <div className="footer-divider"></div>
+          <div className="footer-divider-glow" />
 
-          {/* Creator */}
-          <div className="creator-section">
-            <p className="created-text">Created by</p>
-
-            <div className="creator-name">{SITE_CONFIG.creatorName}</div>
-
-            <div className="creator-brand">{SITE_CONFIG.brandName}</div>
+          {/* Creator Credit */}
+          <div className="creator-block">
+            <span className="credit-label">Engineered & Designed by</span>
+            <h3 className="creator-title">{SITE_CONFIG.creatorName}</h3>
+            <span className="brand-chip">{SITE_CONFIG.brandName}</span>
           </div>
 
           {/* Social Links */}
-          <div className="social-links">
+          <div className="social-links-deck">
             {/* Instagram */}
             <a
               href={SITE_CONFIG.social.instagram}
               target="_blank"
               rel="noopener noreferrer"
-              className="social-icon"
+              className="cinematic-social-btn"
               aria-label="Instagram"
               title="Instagram"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="3" width="18" height="18" rx="5" />
-                <circle cx="12" cy="12" r="4" />
-                <circle cx="17.5" cy="6.5" r="1" className="fill-dot" />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="2" y="2" width="20" height="20" rx="5" ry="5"/>
+                <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/>
+                <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/>
               </svg>
-              <span className="tooltip">Instagram</span>
+              <span className="social-tooltip">Instagram</span>
             </a>
 
             {/* LinkedIn */}
@@ -454,32 +693,30 @@ function App() {
               href={SITE_CONFIG.social.linkedin}
               target="_blank"
               rel="noopener noreferrer"
-              className="social-icon"
+              className="cinematic-social-btn"
               aria-label="LinkedIn"
               title="LinkedIn"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M6 8v10" />
-                <path d="M6 5.5v.1" />
-                <path d="M10 18v-6" />
-                <path d="M10 15c0-2.5 1.2-4 3.4-4 2.1 0 3.6 1.4 3.6 4v3" />
-                <path d="M17 18v-3" />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z" />
+                <rect x="2" y="9" width="4" height="12" />
+                <circle cx="4" cy="4" r="2" />
               </svg>
-              <span className="tooltip">LinkedIn</span>
+              <span className="social-tooltip">LinkedIn</span>
             </a>
 
-            {/* Gmail */}
+            {/* Email */}
             <a
               href={`mailto:${SITE_CONFIG.social.email}`}
-              className="social-icon"
-              aria-label="Gmail"
-              title="Gmail"
+              className="cinematic-social-btn"
+              aria-label="Email"
+              title="Email"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="3" y="5" width="18" height="14" rx="2" />
-                <path d="M4 7l8 6 8-6" />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                <polyline points="22,6 12,13 2,6" />
               </svg>
-              <span className="tooltip">Gmail</span>
+              <span className="social-tooltip">Email</span>
             </a>
 
             {/* GitHub */}
@@ -487,26 +724,24 @@ function App() {
               href={SITE_CONFIG.social.github}
               target="_blank"
               rel="noopener noreferrer"
-              className="social-icon"
+              className="cinematic-social-btn"
               aria-label="GitHub"
               title="GitHub"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M9 19c-4 1.2-4-2-5.5-2.5M15 19v-3.1c0-.9.3-1.5.8-2C18.4 13.6 21 12.3 21 8.2c0-1.1-.4-2.1-1-2.9.1-.3.4-1.5-.1-2.9 0 0-1.2-.4-3.1 1.1-.9-.3-1.9-.4-2.8-.4s-1.9.1-2.8.4C9.3 2 8.1 2.4 8.1 2.4c-.5 1.4-.2 2.6-.1 2.9-.6.8-1 1.8-1 2.9 0 4.1 2.6 5.4 5.2 5.7.3.3.5.8.5 1.5V19" />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22" />
               </svg>
-              <span className="tooltip">GitHub</span>
+              <span className="social-tooltip">GitHub</span>
             </a>
           </div>
 
-          {/* Copyright */}
-          <div className="footer-bottom">
-            <p>© 2026 All-in-One Downloader. All rights reserved.</p>
-
-            <p className="creator-credit">
-              Created with <span>♥</span> by{" "}
-              <strong>{SITE_CONFIG.creatorName}</strong>
-              {" · "}
-              <strong>{SITE_CONFIG.brandName}</strong>
+          {/* Legal / Copyright */}
+          <div className="footer-bottom-copy">
+            <p>© 2026 SAVEALL. All rights reserved.</p>
+            <p className="maker-line">
+              Crafted with <span className="heart-pulse">♥</span> by{" "}
+              <strong>{SITE_CONFIG.creatorName}</strong> ·{" "}
+              <span className="brand-glow">{SITE_CONFIG.brandName}</span>
             </p>
           </div>
         </div>

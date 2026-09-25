@@ -51,13 +51,40 @@ def resolve_executable(name: str):
     return None
 
 
-FFMPEG_PATH = resolve_executable("ffmpeg.exe") or resolve_executable("ffmpeg") or get_ffmpeg_exe()
+def setup_ffmpeg():
+    # 1. System FFmpeg
+    sys_ffmpeg = resolve_executable("ffmpeg") or resolve_executable("ffmpeg.exe")
+    if sys_ffmpeg and os.path.isfile(sys_ffmpeg):
+        return sys_ffmpeg, os.path.dirname(sys_ffmpeg)
+
+    # 2. imageio-ffmpeg
+    try:
+        raw_ffmpeg = get_ffmpeg_exe()
+        if raw_ffmpeg and os.path.isfile(raw_ffmpeg):
+            bin_dir = os.path.dirname(raw_ffmpeg)
+            standard_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+            target_exe = os.path.join(bin_dir, standard_name)
+            if not os.path.isfile(target_exe):
+                try:
+                    shutil.copyfile(raw_ffmpeg, target_exe)
+                except Exception as e:
+                    print("Could not copy ffmpeg to standard name:", e)
+            if os.path.isfile(target_exe):
+                return target_exe, bin_dir
+            return raw_ffmpeg, bin_dir
+    except Exception as e:
+        print("imageio_ffmpeg setup error:", repr(e))
+
+    return None, None
+
+
+FFMPEG_PATH, FFMPEG_DIR = setup_ffmpeg()
 FFPROBE_PATH = resolve_executable("ffprobe.exe") or resolve_executable("ffprobe")
 NODE_PATH = resolve_executable("node.exe") or resolve_executable("node")
-FFMPEG_DIR = os.path.dirname(FFMPEG_PATH) if FFMPEG_PATH else None
 
-if FFMPEG_PATH:
+if FFMPEG_DIR:
     os.environ["PATH"] = f"{FFMPEG_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+if FFMPEG_PATH:
     os.environ["FFMPEG_PATH"] = FFMPEG_PATH
 if FFPROBE_PATH:
     os.environ["FFPROBE_PATH"] = FFPROBE_PATH
@@ -374,11 +401,13 @@ def download_youtube(payload: DownloadRequest, request: Request):
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
     ydl_options = {
-        "format": "18/best[ext=mp4]/best",
+        "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "outtmpl": output_template,
         "noplaylist": True,
         "merge_output_format": "mp4",
-        "ffmpeg_location": FFMPEG_DIR,
+        "ffmpeg_location": FFMPEG_PATH or FFMPEG_DIR,
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 1048576,
         "quiet": True,
         "no_warnings": True,
         "skip_download": False,
@@ -398,7 +427,7 @@ def download_youtube(payload: DownloadRequest, request: Request):
     }
 
     if NODE_PATH:
-        ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+        ydl_options["js_runtimes"] = {"node": {"path": NODE_PATH}}
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
@@ -422,6 +451,7 @@ def download_youtube(payload: DownloadRequest, request: Request):
                 detail="YouTube media file was not saved successfully.",
             )
 
+        filesize = os.path.getsize(downloaded_file) if downloaded_file and os.path.exists(downloaded_file) else None
         base_url = get_public_base_url(request)
         download_url = f"{base_url}/download-file?filename={quote(file_name)}"
 
@@ -434,6 +464,10 @@ def download_youtube(payload: DownloadRequest, request: Request):
             "platform": "YouTube",
             "file_name": file_name,
             "download_url": download_url,
+            "thumbnail": info.get("thumbnail"),
+            "duration": info.get("duration"),
+            "uploader": info.get("uploader") or info.get("channel"),
+            "filesize": filesize,
         }
 
     except HTTPException:
@@ -477,11 +511,13 @@ def download_instagram(payload: DownloadRequest, request: Request):
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
     ydl_options = {
-        "format": "bestvideo+bestaudio/best",
+        "format": "best[ext=mp4]/best",
         "outtmpl": output_template,
         "noplaylist": True,
         "merge_output_format": "mp4",
-        "ffmpeg_location": FFMPEG_DIR,
+        "ffmpeg_location": FFMPEG_PATH or FFMPEG_DIR,
+        "concurrent_fragment_downloads": 6,
+        "buffersize": 1048576,
         "quiet": True,
         "no_warnings": True,
         "skip_download": False,
@@ -493,7 +529,7 @@ def download_instagram(payload: DownloadRequest, request: Request):
     }
 
     if NODE_PATH:
-        ydl_options["js_runtimes"] = {"node": {"executable": NODE_PATH}}
+        ydl_options["js_runtimes"] = {"node": {"path": NODE_PATH}}
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
@@ -520,6 +556,7 @@ def download_instagram(payload: DownloadRequest, request: Request):
         base_url = get_public_base_url(request)
         download_url = f"{base_url}/download-file?filename={quote(file_name)}"
 
+        filesize = os.path.getsize(downloaded_file) if downloaded_file and os.path.exists(downloaded_file) else None
         return {
             "success": True,
             "status": "ready",
@@ -529,6 +566,10 @@ def download_instagram(payload: DownloadRequest, request: Request):
             "platform": "Instagram",
             "file_name": file_name,
             "download_url": download_url,
+            "thumbnail": info.get("thumbnail"),
+            "duration": info.get("duration"),
+            "uploader": info.get("uploader") or info.get("channel"),
+            "filesize": filesize,
         }
 
     except HTTPException:
