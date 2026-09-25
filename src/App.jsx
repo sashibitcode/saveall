@@ -305,11 +305,6 @@ function App() {
 
       {/* Hero Section */}
       <main className="cinematic-main">
-        <div className="hero-badge">
-          <span className="badge-spark">✦</span>
-          <span>CINEMATIC MEDIA DOWNLOADER</span>
-          <span className="badge-pill">FAST & SECURE</span>
-        </div>
 
         <h1 className="hero-headline">
           Save Any Video, <br />
