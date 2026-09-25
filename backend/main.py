@@ -554,8 +554,6 @@ def download_instagram(payload: DownloadRequest, request: Request):
     js_cfg = get_js_runtimes_config()
     if js_cfg:
         ydl_options["js_runtimes"] = js_cfg
-    if YOUTUBE_PROXY:
-        ydl_options["proxy"] = YOUTUBE_PROXY
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
