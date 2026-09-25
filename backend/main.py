@@ -548,3 +548,12 @@ def download_instagram(payload: DownloadRequest, request: Request):
                 os.unlink(cookie_file)
             except Exception:
                 pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    print(f"\n==============================================")
+    print(f"  SAVEALL Backend running at: http://127.0.0.1:{port}")
+    print(f"==============================================\n")
+    uvicorn.run(app, host="127.0.0.1", port=port)

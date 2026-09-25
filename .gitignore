@@ -22,6 +22,7 @@ __pycache__/
 venv/
 env/
 *.part
+saveall-main/
 
 # Editor directories and files
 .vscode/*
