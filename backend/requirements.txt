@@ -1,5 +1,6 @@
-fastapi
-uvicorn
-pydantic
-yt-dlp
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.8.0
+yt-dlp>=2026.8.19
+curl-cffi
 imageio-ffmpeg

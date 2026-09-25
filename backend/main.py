@@ -413,14 +413,10 @@ def download_youtube(payload: DownloadRequest, request: Request):
         "skip_download": False,
         "restrictfilenames": True,
         "nocheckcertificate": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
+        "remote_components": ["ejs:github"],
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": ["ios", "mweb", "android", "web"],
                 "skip": ["translated_subs"],
             }
         },
@@ -432,8 +428,28 @@ def download_youtube(payload: DownloadRequest, request: Request):
         ydl_options["cookiefile"] = cookie_file
 
     try:
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
+        info = None
+        try:
+            with yt_dlp.YoutubeDL(ydl_options) as ydl:
+                info = ydl.extract_info(youtube_url, download=True)
+        except Exception as primary_err:
+            print("Primary YouTube extract failed, trying android fallback:", repr(primary_err))
+            fallback_opts = dict(ydl_options)
+            fallback_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android"],
+                    "skip": ["translated_subs"],
+                }
+            }
+            try:
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=True)
+            except Exception as fallback_err:
+                print("Fallback YouTube extract failed:", repr(fallback_err))
+                fallback_opts_2 = dict(ydl_options)
+                fallback_opts_2.pop("extractor_args", None)
+                with yt_dlp.YoutubeDL(fallback_opts_2) as ydl:
+                    info = ydl.extract_info(youtube_url, download=True)
 
         if not info:
             raise HTTPException(
@@ -480,6 +496,8 @@ def download_youtube(payload: DownloadRequest, request: Request):
                 "YouTube has restricted direct server downloads for this video to prevent automated requests. "
                 "Only authorized public videos without bot restrictions can be processed."
             )
+        elif "player response" in msg.lower():
+            detail = "YouTube extraction error. YouTube restricted cloud server player response for this link."
         elif "http error 403" in msg.lower() or "forbidden" in msg.lower():
             detail = "YouTube access denied (HTTP 403). YouTube restricts direct cloud server IP streaming for this video."
         elif "private" in msg.lower() or "unavailable" in msg.lower():
