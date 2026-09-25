@@ -180,7 +180,7 @@ function App() {
       const data = await readApiResponse(response);
 
       if (!response.ok) {
-        const errorMsg =
+        let errorMsg =
           data.error ||
           data.detail ||
           (response.status === 400
@@ -190,6 +190,11 @@ function App() {
             : response.status === 502 || response.status === 503
             ? "Backend server is temporarily waking up. Please try again shortly."
             : "Server returned an error while processing the link.");
+
+        if (errorMsg.includes("restricted datacenter download") || errorMsg.includes("YOUTUBE_COOKIES_B64")) {
+          errorMsg = "Unable to process this YouTube link from the server. Please try another supported link or try again later.";
+        }
+
         throw new Error(errorMsg);
       }
 

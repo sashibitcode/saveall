@@ -80,16 +80,30 @@ def setup_ffmpeg():
 
 FFMPEG_PATH, FFMPEG_DIR = setup_ffmpeg()
 FFPROBE_PATH = resolve_executable("ffprobe.exe") or resolve_executable("ffprobe")
+DENO_PATH = resolve_executable("deno.exe") or resolve_executable("deno")
 NODE_PATH = resolve_executable("node.exe") or resolve_executable("node")
 
 if FFMPEG_DIR:
     os.environ["PATH"] = f"{FFMPEG_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+if DENO_PATH:
+    os.environ["PATH"] = f"{os.path.dirname(DENO_PATH)}{os.pathsep}{os.environ.get('PATH', '')}"
+if NODE_PATH:
+    os.environ["PATH"] = f"{os.path.dirname(NODE_PATH)}{os.pathsep}{os.environ.get('PATH', '')}"
 if FFMPEG_PATH:
     os.environ["FFMPEG_PATH"] = FFMPEG_PATH
 if FFPROBE_PATH:
     os.environ["FFPROBE_PATH"] = FFPROBE_PATH
 if NODE_PATH:
     os.environ["NODE_PATH"] = NODE_PATH
+
+
+def get_js_runtimes_config():
+    config = {}
+    if DENO_PATH:
+        config["deno"] = {"path": DENO_PATH}
+    if NODE_PATH:
+        config["node"] = {"path": NODE_PATH}
+    return config if config else None
 
 app = FastAPI(
     title="SAVEALL API",
@@ -191,7 +205,25 @@ def cleanup_downloads(max_age_seconds: int = 1800):
         for entry in os.scandir(DOWNLOAD_DIR):
             if entry.is_file():
                 try:
-                    if now - entry.stat().st_mtime > max_age_seconds or entry.name.endswith(".part"):
+                    if now - entry.stat().st_mtime > max_age_seconds or entry.name.endswith((".part", ".ytdl", ".temp")):
+                        os.remove(entry.path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def cleanup_failed_artifacts(identifier: str = None):
+    """Remove partial or temporary files left behind when a download fails."""
+    try:
+        if not os.path.exists(DOWNLOAD_DIR):
+            return
+        for entry in os.scandir(DOWNLOAD_DIR):
+            if entry.is_file():
+                try:
+                    if entry.name.endswith((".part", ".ytdl", ".temp")):
+                        os.remove(entry.path)
+                    elif identifier and len(identifier) > 3 and identifier in entry.name:
                         os.remove(entry.path)
                 except Exception:
                     pass
@@ -344,7 +376,6 @@ def download_file(filename: str):
         filename=safe_name,
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
         },
     )
 
@@ -417,8 +448,9 @@ def download_youtube(payload: DownloadRequest, request: Request):
         "remote_components": ["ejs:github"],
     }
 
-    if NODE_PATH:
-        ydl_options["js_runtimes"] = {"node": {"path": NODE_PATH}}
+    js_cfg = get_js_runtimes_config()
+    if js_cfg:
+        ydl_options["js_runtimes"] = js_cfg
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
@@ -466,19 +498,14 @@ def download_youtube(payload: DownloadRequest, request: Request):
     except Exception as error:
         msg = str(error)
         print("YOUTUBE YT-DLP ERROR:", repr(error))
-        if "sign in to confirm" in msg.lower() or "not a bot" in msg.lower():
-            detail = (
-                "YouTube restricted datacenter download for this link. "
-                "Configure YOUTUBE_COOKIES_B64 in Render if cookies are required."
-            )
-        elif "player response" in msg.lower():
-            detail = "YouTube extraction error. YouTube restricted cloud server player response for this link."
-        elif "http error 403" in msg.lower() or "forbidden" in msg.lower():
-            detail = "YouTube access denied (HTTP 403). YouTube restricts direct cloud server IP streaming for this video."
-        elif "private" in msg.lower() or "unavailable" in msg.lower():
-            detail = "This YouTube video is private or unavailable."
+        cleanup_failed_artifacts()
+
+        if "private" in msg.lower() or "unavailable" in msg.lower() or "removed" in msg.lower():
+            detail = "This YouTube video is private, restricted, or unavailable."
+        elif "members only" in msg.lower() or "premium" in msg.lower() or "purchase" in msg.lower():
+            detail = "This YouTube video requires membership or purchase and cannot be downloaded."
         else:
-            detail = f"Unable to process YouTube URL: {error}"
+            detail = "Unable to process this YouTube link from the server. Please try another supported link or try again later."
 
         raise HTTPException(status_code=400, detail=detail)
     finally:
@@ -521,8 +548,9 @@ def download_instagram(payload: DownloadRequest, request: Request):
         },
     }
 
-    if NODE_PATH:
-        ydl_options["js_runtimes"] = {"node": {"path": NODE_PATH}}
+    js_cfg = get_js_runtimes_config()
+    if js_cfg:
+        ydl_options["js_runtimes"] = js_cfg
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
@@ -570,12 +598,16 @@ def download_instagram(payload: DownloadRequest, request: Request):
     except Exception as error:
         msg = str(error)
         print("INSTAGRAM YT-DLP ERROR:", repr(error))
-        if "empty media response" in msg.lower() or "logged-in" in msg.lower() or "cookies" in msg.lower():
+        cleanup_failed_artifacts()
+
+        if "empty media response" in msg.lower() or "logged-in" in msg.lower() or "cookies" in msg.lower() or "login required" in msg.lower():
             detail = "This Instagram content is private or requires login. Only publicly accessible Instagram Reel/Post links can be downloaded."
         elif "rate-limit" in msg.lower() or "429" in msg.lower():
             detail = "Instagram request was rate-limited. Please wait a few minutes and try again."
+        elif "not found" in msg.lower() or "does not exist" in msg.lower():
+            detail = "This Instagram post or reel could not be found or has been removed."
         else:
-            detail = f"Unable to process Instagram URL: {error}"
+            detail = "Unable to process this Instagram link from the server. Please check the link and try again."
 
         raise HTTPException(status_code=400, detail=detail)
     finally:
