@@ -432,21 +432,24 @@ def download_youtube(payload: DownloadRequest, request: Request):
     cookie_file = create_cookie_file_from_env(YOUTUBE_COOKIES_B64, "saveall-youtube-")
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
-    # Format priority: Progressive 18/22 first for 1s single-stream download, then 720p video+audio multiplex
+    # Format priority: Progressive 22/18 first for instant single-stream download, then 720p stream-copy multiplex
     ydl_options = {
-        "format": "18/22/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "format": "22/18/best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
         "outtmpl": output_template,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "ffmpeg_location": FFMPEG_PATH or FFMPEG_DIR,
-        "concurrent_fragment_downloads": 8,
-        "buffersize": 1048576,
+        "postprocessor_args": {"ffmpeg": ["-c", "copy"]},
+        "concurrent_fragment_downloads": 4,
+        "buffersize": 524288,
         "quiet": True,
         "no_warnings": True,
         "skip_download": False,
         "restrictfilenames": True,
         "nocheckcertificate": True,
-        "remote_components": ["ejs:github"],
+        "socket_timeout": 12,
+        "retries": 1,
+        "fragment_retries": 1,
     }
 
     js_cfg = get_js_runtimes_config()
@@ -458,8 +461,19 @@ def download_youtube(payload: DownloadRequest, request: Request):
         ydl_options["cookiefile"] = cookie_file
 
     try:
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_options) as ydl:
+                info = ydl.extract_info(youtube_url, download=True)
+        except Exception as primary_err:
+            err_str = str(primary_err).lower()
+            if YOUTUBE_PROXY and ("402" in err_str or "proxy" in err_str or "tunnel" in err_str):
+                print("YOUTUBE PROXY ERROR (Retrying direct):", repr(primary_err))
+                direct_opts = dict(ydl_options)
+                direct_opts.pop("proxy", None)
+                with yt_dlp.YoutubeDL(direct_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=True)
+            else:
+                raise primary_err
 
         if not info:
             raise HTTPException(
@@ -539,12 +553,15 @@ def download_instagram(payload: DownloadRequest, request: Request):
         "noplaylist": True,
         "merge_output_format": "mp4",
         "ffmpeg_location": FFMPEG_PATH or FFMPEG_DIR,
-        "concurrent_fragment_downloads": 6,
-        "buffersize": 1048576,
+        "postprocessor_args": {"ffmpeg": ["-c", "copy"]},
+        "concurrent_fragment_downloads": 4,
+        "buffersize": 524288,
         "quiet": True,
         "no_warnings": True,
         "skip_download": False,
         "restrictfilenames": True,
+        "socket_timeout": 12,
+        "retries": 1,
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
