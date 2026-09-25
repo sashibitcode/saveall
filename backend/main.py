@@ -400,27 +400,21 @@ def download_youtube(payload: DownloadRequest, request: Request):
     cookie_file = create_cookie_file_from_env(YOUTUBE_COOKIES_B64, "saveall-youtube-")
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
-    # Prefer progressive MP4 formats (18 = 360p, 22 = 720p) for instant, single-stream download without ffmpeg multiplexing overhead
+    # Format priority: Progressive 18/22 first for 1s single-stream download, then 720p video+audio multiplex
     ydl_options = {
-        "format": "18/22/best[height<=720][ext=mp4]/bestvideo[height<=720]+bestaudio/best",
+        "format": "18/22/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "outtmpl": output_template,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "ffmpeg_location": FFMPEG_PATH or FFMPEG_DIR,
-        "concurrent_fragment_downloads": 4,
-        "buffersize": 524288,
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 1048576,
         "quiet": True,
         "no_warnings": True,
         "skip_download": False,
         "restrictfilenames": True,
         "nocheckcertificate": True,
         "remote_components": ["ejs:github"],
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-                "skip": ["translated_subs"],
-            }
-        },
     }
 
     if NODE_PATH:
@@ -429,21 +423,8 @@ def download_youtube(payload: DownloadRequest, request: Request):
         ydl_options["cookiefile"] = cookie_file
 
     try:
-        info = None
-        try:
-            with yt_dlp.YoutubeDL(ydl_options) as ydl:
-                info = ydl.extract_info(youtube_url, download=True)
-        except Exception as primary_err:
-            print("Primary Android extract failed, trying web_safari fallback:", repr(primary_err))
-            fallback_opts = dict(ydl_options)
-            fallback_opts["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["web_safari", "android"],
-                    "skip": ["translated_subs"],
-                }
-            }
-            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=True)
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            info = ydl.extract_info(youtube_url, download=True)
 
         if not info:
             raise HTTPException(
