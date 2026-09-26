@@ -47,8 +47,13 @@ async function readApiResponse(response) {
 }
 
 function isValidYouTubeUrl(value) {
+  if (!value) return false;
+  let clean = value.trim();
+  if (!/^https?:\/\//i.test(clean)) {
+    clean = "https://" + clean;
+  }
   try {
-    const parsed = new URL(value);
+    const parsed = new URL(clean);
     const host = parsed.hostname.toLowerCase();
     return (
       (parsed.protocol === "http:" || parsed.protocol === "https:") &&
@@ -61,8 +66,13 @@ function isValidYouTubeUrl(value) {
 }
 
 function isValidInstagramUrl(value) {
+  if (!value) return false;
+  let clean = value.trim();
+  if (!/^https?:\/\//i.test(clean)) {
+    clean = "https://" + clean;
+  }
   try {
-    const parsed = new URL(value);
+    const parsed = new URL(clean);
     const host = parsed.hostname.toLowerCase();
     return (
       (parsed.protocol === "http:" || parsed.protocol === "https:") &&
@@ -116,21 +126,22 @@ function App() {
 
   // Rotate loading stage for engaging cinematic feedback
   useEffect(() => {
-    let timer;
-    if (loading) {
-      setStageIndex(0);
-      timer = setInterval(() => {
-        setStageIndex((prev) => (prev < LOADING_STAGES.length - 1 ? prev + 1 : prev));
-      }, 2200);
-    }
+    if (!loading) return;
+    const timer = setInterval(() => {
+      setStageIndex((prev) => (prev < LOADING_STAGES.length - 1 ? prev + 1 : prev));
+    }, 2200);
     return () => clearInterval(timer);
   }, [loading]);
 
   const handleGetVideo = async () => {
-    const cleanUrl = url.trim();
+    let cleanUrl = url.trim();
+    if (cleanUrl && !/^https?:\/\//i.test(cleanUrl)) {
+      cleanUrl = "https://" + cleanUrl;
+    }
 
     setError("");
     setResult(null);
+    setStageIndex(0);
 
     if (!cleanUrl) {
       setError(`Please paste a ${platform === "youtube" ? "YouTube" : "Instagram"} video link.`);
@@ -190,10 +201,6 @@ function App() {
             : response.status === 502 || response.status === 503
             ? "Backend server is temporarily waking up. Please try again shortly."
             : "Server returned an error while processing the link.");
-
-        if (errorMsg.includes("restricted datacenter download") || errorMsg.includes("YOUTUBE_COOKIES_B64")) {
-          errorMsg = "Unable to process this YouTube link from the server. Please try another supported link or try again later.";
-        }
 
         throw new Error(errorMsg);
       }

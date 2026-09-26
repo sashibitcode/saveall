@@ -6,6 +6,7 @@
     ".venv/Lib/site-packages"
   ],
   "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
   "pythonVersion": "3.10",
   "pythonPlatform": "Windows"
 }

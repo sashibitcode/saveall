@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import time
+from typing import Any, cast
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, HTTPException, Request
@@ -13,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from imageio_ffmpeg import get_ffmpeg_exe
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
-import yt_dlp
+import yt_dlp  # type: ignore[import-untyped]
 
 # Environment variables
 FRONTEND_ORIGINS = [
@@ -186,10 +187,20 @@ def get_public_base_url(request: Request) -> str:
     if PUBLIC_API_URL:
         return PUBLIC_API_URL
 
-    forwarded_proto = request.headers.get("x-forwarded-proto")
-    forwarded_host = request.headers.get("x-forwarded-host")
-    host = forwarded_host or request.headers.get("host") or "127.0.0.1:8000"
-    scheme = forwarded_proto or request.url.scheme
+    forwarded_proto = None
+    forwarded_host = None
+    host = "127.0.0.1:8000"
+    scheme = "http"
+
+    if hasattr(request, "headers") and request.headers is not None:
+        forwarded_proto = request.headers.get("x-forwarded-proto")
+        forwarded_host = request.headers.get("x-forwarded-host")
+        host = forwarded_host or request.headers.get("host") or "127.0.0.1:8000"
+
+    try:
+        scheme = forwarded_proto or (request.url.scheme if hasattr(request, "url") and hasattr(request.url, "scheme") else "http")
+    except Exception:
+        scheme = forwarded_proto or "http"
 
     if "onrender.com" in host or forwarded_proto == "https":
         scheme = "https"
@@ -214,7 +225,7 @@ def cleanup_downloads(max_age_seconds: int = 1800):
         pass
 
 
-def cleanup_failed_artifacts(identifier: str = None):
+def cleanup_failed_artifacts(identifier: str | None = None):
     """Remove partial or temporary files left behind when a download fails."""
     try:
         if not os.path.exists(DOWNLOAD_DIR):
@@ -247,7 +258,7 @@ def create_cookie_file_from_env(encoded_cookies: str, prefix: str):
         return None
 
 
-def find_downloaded_file(info: dict = None, title: str = None):
+def find_downloaded_file(info: dict | None = None, title: str | None = None):
     valid_ext = {".mp4", ".webm", ".mkv", ".avi", ".flv", ".m4v", ".mov", ".mp3", ".m4a"}
 
     if info:
@@ -288,21 +299,50 @@ def find_downloaded_file(info: dict = None, title: str = None):
     return max(all_files, key=os.path.getmtime) if all_files else None
 
 
+def sanitize_youtube_url(url: str) -> str:
+    """Normalize YouTube URL and remove playlist parameters to isolate the single video."""
+    if not url:
+        return ""
+    clean = url.strip()
+    if not clean.startswith(("http://", "https://")):
+        clean = "https://" + clean
+    try:
+        parsed = urlparse(clean)
+        # If it's a standard watch URL, preserve only the 'v' parameter
+        if "youtube.com" in (parsed.netloc or "").lower() and parsed.path == "/watch":
+            from urllib.parse import parse_qs, urlencode
+            qs = parse_qs(parsed.query)
+            if "v" in qs and qs["v"]:
+                clean_query = urlencode({"v": qs["v"][0]})
+                return f"{parsed.scheme}://{parsed.netloc}/watch?{clean_query}"
+    except Exception:
+        pass
+    return clean
+
+
 def is_valid_youtube_url(url: str) -> bool:
-    parsed = urlparse(url.strip())
-    host = (parsed.netloc or "").lower()
-    if not parsed.scheme or not parsed.netloc:
+    if not url:
         return False
-    if parsed.scheme not in {"http", "https"}:
+    clean = url.strip()
+    if not clean.startswith(("http://", "https://")):
+        clean = "https://" + clean
+    try:
+        parsed = urlparse(clean)
+        host = (parsed.netloc or "").lower()
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        allowed_hosts = {
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "music.youtube.com",
+            "youtu.be",
+        }
+        return host in allowed_hosts or host.endswith(".youtube.com")
+    except Exception:
         return False
-    allowed_hosts = {
-        "youtube.com",
-        "www.youtube.com",
-        "m.youtube.com",
-        "music.youtube.com",
-        "youtu.be",
-    }
-    return host in allowed_hosts or host.endswith(".youtube.com")
 
 
 def is_valid_instagram_url(url: str) -> bool:
@@ -388,11 +428,15 @@ def download_media(payload: DownloadRequest, request: Request):
     url = (payload.url or "").strip()
     platform = (payload.platform or "").strip()
 
-    if not url.startswith(("http://", "https://")):
+    if not url:
         raise HTTPException(
             status_code=400,
-            detail="Invalid URL. Please enter a valid link starting with http:// or https://",
+            detail="Invalid URL. Please enter a valid video link.",
         )
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+        payload.url = url
 
     # Auto-detect platform if not provided
     if not platform:
@@ -421,7 +465,7 @@ def download_media(payload: DownloadRequest, request: Request):
 @app.post("/download-youtube")
 @app.post("/api/download-youtube")
 def download_youtube(payload: DownloadRequest, request: Request):
-    youtube_url = payload.url.strip()
+    youtube_url = sanitize_youtube_url(payload.url)
     if not is_valid_youtube_url(youtube_url):
         raise HTTPException(
             status_code=400,
@@ -432,9 +476,9 @@ def download_youtube(payload: DownloadRequest, request: Request):
     cookie_file = create_cookie_file_from_env(YOUTUBE_COOKIES_B64, "saveall-youtube-")
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
-    # Format priority: Progressive 22/18 first for instant single-stream download, then 720p stream-copy multiplex
-    ydl_options = {
-        "format": "22/18/best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
+    # Tier 1 format priority: Progressive 22/18 first for instant single-stream download, then 720p stream-copy multiplex
+    ydl_options: Any = {
+        "format": "22/18/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
         "outtmpl": output_template,
         "noplaylist": True,
         "merge_output_format": "mp4",
@@ -447,9 +491,14 @@ def download_youtube(payload: DownloadRequest, request: Request):
         "skip_download": False,
         "restrictfilenames": True,
         "nocheckcertificate": True,
-        "socket_timeout": 12,
-        "retries": 1,
-        "fragment_retries": 1,
+        "socket_timeout": 15,
+        "retries": 2,
+        "fragment_retries": 2,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "mweb", "web"]
+            }
+        },
     }
 
     js_cfg = get_js_runtimes_config()
@@ -460,20 +509,55 @@ def download_youtube(payload: DownloadRequest, request: Request):
     if cookie_file:
         ydl_options["cookiefile"] = cookie_file
 
+    info = None
     try:
         try:
-            with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            with yt_dlp.YoutubeDL(cast(Any, ydl_options)) as ydl:
                 info = ydl.extract_info(youtube_url, download=True)
         except Exception as primary_err:
             err_str = str(primary_err).lower()
+            print("YOUTUBE PRIMARY DOWNLOAD ATTEMPT ERROR:", repr(primary_err))
+
+            # Failover 1: Proxy error failover to direct connection
             if YOUTUBE_PROXY and ("402" in err_str or "proxy" in err_str or "tunnel" in err_str):
-                print("YOUTUBE PROXY ERROR (Retrying direct):", repr(primary_err))
-                direct_opts = dict(ydl_options)
-                direct_opts.pop("proxy", None)
-                with yt_dlp.YoutubeDL(direct_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=True)
-            else:
-                raise primary_err
+                try:
+                    print("YOUTUBE PROXY FAILOVER (Retrying direct):", repr(primary_err))
+                    direct_opts = dict(ydl_options)
+                    direct_opts.pop("proxy", None)
+                    with yt_dlp.YoutubeDL(cast(Any, direct_opts)) as ydl:
+                        info = ydl.extract_info(youtube_url, download=True)
+                except Exception as proxy_err:
+                    print("YOUTUBE DIRECT FAILOVER ERROR:", repr(proxy_err))
+                    err_str = str(proxy_err).lower()
+
+            # Failover 2 (Tier 2): Flexible transcode muxing without stream-copy restriction
+            if not info:
+                try:
+                    print("YOUTUBE RETRYING TIER 2 (Transcoded muxing & flexible format)...")
+                    tier2_opts = dict(ydl_options)
+                    tier2_opts.pop("postprocessor_args", None)  # allow FFmpeg to transcode if -c copy failed
+                    tier2_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best"
+                    tier2_opts["extractor_args"] = {
+                        "youtube": {
+                            "player_client": ["mweb", "android", "web"]
+                        }
+                    }
+                    with yt_dlp.YoutubeDL(cast(Any, tier2_opts)) as ydl:
+                        info = ydl.extract_info(youtube_url, download=True)
+                except Exception as tier2_err:
+                    print("YOUTUBE TIER 2 ERROR:", repr(tier2_err))
+                    # Failover 3 (Tier 3): Universal fallback
+                    try:
+                        print("YOUTUBE RETRYING TIER 3 (Universal fallback)...")
+                        tier3_opts = dict(ydl_options)
+                        tier3_opts.pop("postprocessor_args", None)
+                        tier3_opts.pop("extractor_args", None)
+                        tier3_opts["format"] = "bestvideo+bestaudio/best"
+                        with yt_dlp.YoutubeDL(cast(Any, tier3_opts)) as ydl:
+                            info = ydl.extract_info(youtube_url, download=True)
+                    except Exception as tier3_err:
+                        print("YOUTUBE TIER 3 ERROR:", repr(tier3_err))
+                        raise primary_err
 
         if not info:
             raise HTTPException(
@@ -517,10 +601,12 @@ def download_youtube(payload: DownloadRequest, request: Request):
         print("YOUTUBE YT-DLP ERROR:", repr(error))
         cleanup_failed_artifacts()
 
-        if "private" in msg.lower() or "unavailable" in msg.lower() or "removed" in msg.lower():
+        if "private" in msg.lower() or "unavailable" in msg.lower() or "removed" in msg.lower() or "not exist" in msg.lower():
             detail = "This YouTube video is private, restricted, or unavailable."
         elif "members only" in msg.lower() or "premium" in msg.lower() or "purchase" in msg.lower():
             detail = "This YouTube video requires membership or purchase and cannot be downloaded."
+        elif "sign in to confirm you're not a bot" in msg.lower() or "bot" in msg.lower() or "429" in msg.lower():
+            detail = "YouTube rate-limited or blocked this request (bot protection). Please try again or run the local backend server."
         else:
             detail = "Unable to process this YouTube link from the server. Please try another supported link or try again later."
 
@@ -547,7 +633,7 @@ def download_instagram(payload: DownloadRequest, request: Request):
     cookie_file = create_cookie_file_from_env(INSTAGRAM_COOKIES_B64, "saveall-instagram-")
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
-    ydl_options = {
+    ydl_options: Any = {
         "format": "best[ext=mp4]/best",
         "outtmpl": output_template,
         "noplaylist": True,
@@ -575,7 +661,7 @@ def download_instagram(payload: DownloadRequest, request: Request):
         ydl_options["cookiefile"] = cookie_file
 
     try:
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+        with yt_dlp.YoutubeDL(cast(Any, ydl_options)) as ydl:
             info = ydl.extract_info(instagram_url, download=True)
 
         if not info:
