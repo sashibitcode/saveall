@@ -391,6 +391,17 @@ def health():
     }
 
 
+@app.get("/version")
+@app.get("/api/version")
+def version():
+    return {
+        "success": True,
+        "version": "2.3.0",
+        "client": "android-optimized",
+        "status": "active",
+    }
+
+
 @app.get("/download-folder")
 @app.get("/api/download-folder")
 def download_folder():
@@ -496,7 +507,7 @@ def download_youtube(payload: DownloadRequest, request: Request):
         "fragment_retries": 2,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "mweb", "web"]
+                "player_client": ["android"]
             }
         },
     }
@@ -530,34 +541,49 @@ def download_youtube(payload: DownloadRequest, request: Request):
                     print("YOUTUBE DIRECT FAILOVER ERROR:", repr(proxy_err))
                     err_str = str(proxy_err).lower()
 
-            # Failover 2 (Tier 2): Flexible transcode muxing without stream-copy restriction
+            # Failover 2 (Tier 2): iOS mobile client without stream-copy restriction
             if not info:
                 try:
-                    print("YOUTUBE RETRYING TIER 2 (Transcoded muxing & flexible format)...")
+                    print("YOUTUBE RETRYING TIER 2 (iOS mobile client & transcode muxing)...")
                     tier2_opts = dict(ydl_options)
                     tier2_opts.pop("postprocessor_args", None)  # allow FFmpeg to transcode if -c copy failed
                     tier2_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best"
                     tier2_opts["extractor_args"] = {
                         "youtube": {
-                            "player_client": ["mweb", "android", "web"]
+                            "player_client": ["ios", "android"]
                         }
                     }
                     with yt_dlp.YoutubeDL(cast(Any, tier2_opts)) as ydl:
                         info = ydl.extract_info(youtube_url, download=True)
                 except Exception as tier2_err:
                     print("YOUTUBE TIER 2 ERROR:", repr(tier2_err))
-                    # Failover 3 (Tier 3): Universal fallback
+                    # Failover 3 (Tier 3): Mobile Web fallback
                     try:
-                        print("YOUTUBE RETRYING TIER 3 (Universal fallback)...")
+                        print("YOUTUBE RETRYING TIER 3 (Mobile Web & Android fallback)...")
                         tier3_opts = dict(ydl_options)
                         tier3_opts.pop("postprocessor_args", None)
-                        tier3_opts.pop("extractor_args", None)
+                        tier3_opts["extractor_args"] = {
+                            "youtube": {
+                                "player_client": ["mweb", "android"]
+                            }
+                        }
                         tier3_opts["format"] = "bestvideo+bestaudio/best"
                         with yt_dlp.YoutubeDL(cast(Any, tier3_opts)) as ydl:
                             info = ydl.extract_info(youtube_url, download=True)
                     except Exception as tier3_err:
                         print("YOUTUBE TIER 3 ERROR:", repr(tier3_err))
-                        raise primary_err
+                        # Failover 4: Universal fallback without extractor args
+                        try:
+                            print("YOUTUBE RETRYING TIER 4 (Universal default fallback)...")
+                            tier4_opts = dict(ydl_options)
+                            tier4_opts.pop("postprocessor_args", None)
+                            tier4_opts.pop("extractor_args", None)
+                            tier4_opts["format"] = "bestvideo+bestaudio/best"
+                            with yt_dlp.YoutubeDL(cast(Any, tier4_opts)) as ydl:
+                                info = ydl.extract_info(youtube_url, download=True)
+                        except Exception as tier4_err:
+                            print("YOUTUBE TIER 4 ERROR:", repr(tier4_err))
+                            raise primary_err
 
         if not info:
             raise HTTPException(
@@ -605,10 +631,10 @@ def download_youtube(payload: DownloadRequest, request: Request):
             detail = "This YouTube video is private, restricted, or unavailable."
         elif "members only" in msg.lower() or "premium" in msg.lower() or "purchase" in msg.lower():
             detail = "This YouTube video requires membership or purchase and cannot be downloaded."
-        elif "sign in to confirm you're not a bot" in msg.lower() or "bot" in msg.lower() or "429" in msg.lower():
-            detail = "YouTube rate-limited or blocked this request (bot protection). Please try again or run the local backend server."
+        elif "sign in" in msg.lower() or "bot" in msg.lower() or "429" in msg.lower() or "confirm you're not a bot" in msg.lower() or "cookies" in msg.lower():
+            detail = "YouTube blocked cloud datacenter access (bot protection). Please run the local backend server (start-dev.bat) for instant downloads, or configure YOUTUBE_COOKIES_B64 in Render."
         else:
-            detail = "Unable to process this YouTube link from the server. Please try another supported link or try again later."
+            detail = f"Unable to process this YouTube link from the server. ({msg[:90] if msg else 'error'})"
 
         raise HTTPException(status_code=400, detail=detail)
     finally:
