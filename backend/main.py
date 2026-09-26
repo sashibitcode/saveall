@@ -1,11 +1,14 @@
 import base64
+import json
 import mimetypes
 import os
 import shutil
 import tempfile
 import time
 from typing import Any, cast
+import urllib.error
 from urllib.parse import quote, urlparse
+import urllib.request
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -29,13 +32,35 @@ FRONTEND_ORIGINS = [
 PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "").strip().rstrip("/")
 YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64", "").strip()
 INSTAGRAM_COOKIES_B64 = os.getenv("INSTAGRAM_COOKIES_B64", "").strip()
-YOUTUBE_PROXY = os.getenv("YOUTUBE_PROXY", os.getenv("HTTP_PROXY", "")).strip()
+
+
+def normalize_proxy_url(raw_proxy: str | None) -> str:
+    """Normalize user-provided proxy strings (including Webshare export formats) into standard URLs."""
+    if not raw_proxy:
+        return ""
+    p = raw_proxy.strip().strip("'\"")
+    if not p:
+        return ""
+    if "://" in p:
+        return p
+    # Handle Webshare colon export format: host:port:username:password
+    parts = p.split(":")
+    if len(parts) == 4:
+        host, port, user, pwd = parts
+        return f"http://{user}:{pwd}@{host}:{port}"
+    if "@" in p:
+        return f"http://{p}"
+    return f"http://{p}"
+
+
+YOUTUBE_PROXY = normalize_proxy_url(os.getenv("YOUTUBE_PROXY", os.getenv("HTTP_PROXY", "")))
 DOWNLOAD_DIR = os.getenv(
     "DOWNLOAD_DIR",
     os.path.join(tempfile.gettempdir(), "saveall-downloads"),
 )
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 
 
 def resolve_executable(name: str):
@@ -394,10 +419,32 @@ def health():
 @app.get("/version")
 @app.get("/api/version")
 def version():
+    proxy_info: dict[str, Any] = {"configured": bool(YOUTUBE_PROXY)}
+    if YOUTUBE_PROXY:
+        try:
+            parsed = urlparse(YOUTUBE_PROXY)
+            proxy_info["scheme"] = parsed.scheme
+            proxy_info["host"] = parsed.hostname
+            proxy_info["port"] = parsed.port
+            proxy_info["has_auth"] = bool(parsed.username)
+            if parsed.username:
+                proxy_info["user_preview"] = parsed.username[:4] + "***"
+            # Quick 6-second connectivity test to verify proxy connection to YouTube
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": YOUTUBE_PROXY, "https": YOUTUBE_PROXY})
+            )
+            req = urllib.request.Request("https://www.youtube.com/generate_204", headers={"User-Agent": "Mozilla/5.0"})
+            with opener.open(req, timeout=6) as resp:
+                proxy_info["connectivity"] = f"connected ({resp.status})"
+        except Exception as e:
+            proxy_info["connectivity"] = f"failed: {str(e)}"
+    else:
+        proxy_info["connectivity"] = "none"
+
     return {
         "success": True,
-        "version": "2.3.0",
-        "client": "android-optimized",
+        "version": "2.4.0",
+        "proxy": proxy_info,
         "status": "active",
     }
 
@@ -487,30 +534,34 @@ def download_youtube(payload: DownloadRequest, request: Request):
     cookie_file = create_cookie_file_from_env(YOUTUBE_COOKIES_B64, "saveall-youtube-")
 
     output_template = os.path.join(DOWNLOAD_DIR, "%(title).50s-%(id)s.%(ext)s")
-    # Tier 1 format priority: Progressive 22/18 first for instant single-stream download, then 720p stream-copy multiplex
+    # Tier 1 format priority: Progressive 18/22 first for 1s single-stream download, then 720p multiplex
     ydl_options: Any = {
-        "format": "22/18/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
+        "format": "18/22/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
         "outtmpl": output_template,
         "noplaylist": True,
         "merge_output_format": "mp4",
         "ffmpeg_location": FFMPEG_PATH or FFMPEG_DIR,
-        "postprocessor_args": {"ffmpeg": ["-c", "copy"]},
-        "concurrent_fragment_downloads": 4,
-        "buffersize": 524288,
+        "concurrent_fragment_downloads": 6,
+        "buffersize": 1048576,
         "quiet": True,
         "no_warnings": True,
         "skip_download": False,
         "restrictfilenames": True,
         "nocheckcertificate": True,
-        "socket_timeout": 15,
-        "retries": 2,
-        "fragment_retries": 2,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"]
-            }
-        },
+        "remote_components": ["ejs:github"],
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
     }
+
+    # When NO proxy is present (direct cloud datacenter connection),
+    # use mobile clients to avoid datacenter bot protection
+    if not YOUTUBE_PROXY:
+        ydl_options["extractor_args"] = {
+            "youtube": {
+                "player_client": ["android", "ios", "mweb"]
+            }
+        }
 
     js_cfg = get_js_runtimes_config()
     if js_cfg:
@@ -529,61 +580,68 @@ def download_youtube(payload: DownloadRequest, request: Request):
             err_str = str(primary_err).lower()
             print("YOUTUBE PRIMARY DOWNLOAD ATTEMPT ERROR:", repr(primary_err))
 
-            # Failover 1: Proxy error failover to direct connection
-            if YOUTUBE_PROXY and ("402" in err_str or "proxy" in err_str or "tunnel" in err_str):
-                try:
-                    print("YOUTUBE PROXY FAILOVER (Retrying direct):", repr(primary_err))
-                    direct_opts = dict(ydl_options)
-                    direct_opts.pop("proxy", None)
-                    with yt_dlp.YoutubeDL(cast(Any, direct_opts)) as ydl:
-                        info = ydl.extract_info(youtube_url, download=True)
-                except Exception as proxy_err:
-                    print("YOUTUBE DIRECT FAILOVER ERROR:", repr(proxy_err))
-                    err_str = str(proxy_err).lower()
+            # Prepare direct fallback options WITHOUT proxy
+            direct_fallback_opts = dict(ydl_options)
+            direct_fallback_opts.pop("proxy", None)
+            direct_fallback_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android", "ios", "mweb"]
+                }
+            }
 
-            # Failover 2 (Tier 2): iOS mobile client without stream-copy restriction
-            if not info:
+            last_err = primary_err
+            # Failover 1: Direct datacenter connection with Android/iOS client
+            try:
+                print("YOUTUBE RETRYING FAILOVER 1 (Direct connection / Mobile client)...")
+                with yt_dlp.YoutubeDL(cast(Any, direct_fallback_opts)) as ydl:
+                    info = ydl.extract_info(youtube_url, download=True)
+            except Exception as f1_err:
+                print("YOUTUBE FAILOVER 1 ERROR:", repr(f1_err))
+                last_err = f1_err
+
+                # Failover 2: Flexible transcode muxing with broader format selector
                 try:
-                    print("YOUTUBE RETRYING TIER 2 (iOS mobile client & transcode muxing)...")
-                    tier2_opts = dict(ydl_options)
-                    tier2_opts.pop("postprocessor_args", None)  # allow FFmpeg to transcode if -c copy failed
-                    tier2_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best"
-                    tier2_opts["extractor_args"] = {
+                    print("YOUTUBE RETRYING FAILOVER 2 (Flexible format & muxing)...")
+                    f2_opts = dict(direct_fallback_opts)
+                    f2_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best"
+                    f2_opts["extractor_args"] = {
                         "youtube": {
                             "player_client": ["ios", "android"]
                         }
                     }
-                    with yt_dlp.YoutubeDL(cast(Any, tier2_opts)) as ydl:
+                    with yt_dlp.YoutubeDL(cast(Any, f2_opts)) as ydl:
                         info = ydl.extract_info(youtube_url, download=True)
-                except Exception as tier2_err:
-                    print("YOUTUBE TIER 2 ERROR:", repr(tier2_err))
-                    # Failover 3 (Tier 3): Mobile Web fallback
+                except Exception as f2_err:
+                    print("YOUTUBE FAILOVER 2 ERROR:", repr(f2_err))
+                    last_err = f2_err
+
+                    # Failover 3: Mobile Web fallback
                     try:
-                        print("YOUTUBE RETRYING TIER 3 (Mobile Web & Android fallback)...")
-                        tier3_opts = dict(ydl_options)
-                        tier3_opts.pop("postprocessor_args", None)
-                        tier3_opts["extractor_args"] = {
+                        print("YOUTUBE RETRYING FAILOVER 3 (Mobile Web fallback)...")
+                        f3_opts = dict(direct_fallback_opts)
+                        f3_opts["extractor_args"] = {
                             "youtube": {
                                 "player_client": ["mweb", "android"]
                             }
                         }
-                        tier3_opts["format"] = "bestvideo+bestaudio/best"
-                        with yt_dlp.YoutubeDL(cast(Any, tier3_opts)) as ydl:
+                        f3_opts["format"] = "bestvideo+bestaudio/best"
+                        with yt_dlp.YoutubeDL(cast(Any, f3_opts)) as ydl:
                             info = ydl.extract_info(youtube_url, download=True)
-                    except Exception as tier3_err:
-                        print("YOUTUBE TIER 3 ERROR:", repr(tier3_err))
+                    except Exception as f3_err:
+                        print("YOUTUBE FAILOVER 3 ERROR:", repr(f3_err))
+                        last_err = f3_err
+
                         # Failover 4: Universal fallback without extractor args
                         try:
-                            print("YOUTUBE RETRYING TIER 4 (Universal default fallback)...")
-                            tier4_opts = dict(ydl_options)
-                            tier4_opts.pop("postprocessor_args", None)
-                            tier4_opts.pop("extractor_args", None)
-                            tier4_opts["format"] = "bestvideo+bestaudio/best"
-                            with yt_dlp.YoutubeDL(cast(Any, tier4_opts)) as ydl:
+                            print("YOUTUBE RETRYING FAILOVER 4 (Universal fallback)...")
+                            f4_opts = dict(direct_fallback_opts)
+                            f4_opts.pop("extractor_args", None)
+                            f4_opts["format"] = "best"
+                            with yt_dlp.YoutubeDL(cast(Any, f4_opts)) as ydl:
                                 info = ydl.extract_info(youtube_url, download=True)
-                        except Exception as tier4_err:
-                            print("YOUTUBE TIER 4 ERROR:", repr(tier4_err))
-                            raise primary_err
+                        except Exception as f4_err:
+                            print("YOUTUBE FAILOVER 4 ERROR:", repr(f4_err))
+                            raise last_err
 
         if not info:
             raise HTTPException(
@@ -631,10 +689,13 @@ def download_youtube(payload: DownloadRequest, request: Request):
             detail = "This YouTube video is private, restricted, or unavailable."
         elif "members only" in msg.lower() or "premium" in msg.lower() or "purchase" in msg.lower():
             detail = "This YouTube video requires membership or purchase and cannot be downloaded."
+        elif "tunnel" in msg.lower() or "407" in msg.lower() or "402" in msg.lower():
+            detail = "The proxy server connection failed or credentials expired. Please check your proxy settings in Render."
         elif "sign in" in msg.lower() or "bot" in msg.lower() or "429" in msg.lower() or "confirm you're not a bot" in msg.lower() or "cookies" in msg.lower():
             detail = "YouTube blocked cloud datacenter access (bot protection). Please run the local backend server (start-dev.bat) for instant downloads, or configure YOUTUBE_COOKIES_B64 in Render."
         else:
-            detail = f"Unable to process this YouTube link from the server. ({msg[:90] if msg else 'error'})"
+            first_line = msg.split("\n")[0].strip()
+            detail = f"Unable to process this YouTube link from the server. ({first_line[:120]})"
 
         raise HTTPException(status_code=400, detail=detail)
     finally:
